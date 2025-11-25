@@ -33,7 +33,10 @@
 #include <signal.h>
 #include <errno.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 #include "src/common/xmalloc.h"
 #include "src/common/xstring.h"
@@ -252,6 +255,32 @@ const char * pipecmd_target (pipecmd_t p)
 
 static void closeall (int fd)
 {
+#ifdef __linux
+    struct dirent *d;
+    DIR *dir;
+    dir = opendir("/proc/self/fd");
+    if (dir) {
+        int dfd = dirfd(dir);
+        while ((d = readdir(dir))) {
+            char * end;
+            unsigned int ufd;
+            int cfd;
+
+            if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, ".."))
+                continue;
+            errno = 0;
+            ufd = strtoul(d->d_name, &end, 10);
+            if (errno || end == d->d_name || !end || *end)
+                continue;
+            cfd = (int) ufd;
+            if (cfd == dfd || cfd < fd)
+                continue;
+            close(cfd);
+        }
+        closedir(dir);
+        return;
+    }
+#endif
     int fdlimit = sysconf (_SC_OPEN_MAX);
 
     while (fd < fdlimit)
