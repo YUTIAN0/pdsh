@@ -1,40 +1,35 @@
 queue_rules:
   - name: default
-    queue_conditions:
-      - base=master
-      - label="merge-when-passing"
-      - label!="work-in-progress"
-      - "approved-reviews-by=@chaos/chaos-developers"
-      - "#approved-reviews-by>0"
-      - "#changes-requested-reviews-by=0"
-      - -title~=^\[*[Ww][Ii][Pp]
-    merge_conditions:
-      - base=master
-      - status-success="validate commits"
-      - status-success="ubuntu"
-      - status-success="macos"
-      - status-success="coverage"
-      - label="merge-when-passing"
-      - label!="work-in-progress"
-      - "approved-reviews-by=@chaos/chaos-developers"
-      - "#approved-reviews-by>0"
-      - "#changes-requested-reviews-by=0"
-      - -title~=^\[*[Ww][Ii][Pp]
+    batch_size: 1
     update_method: rebase
     merge_method: merge
 
+# Avoid temporary branches created by mergify for parallel checks
+# These do not work with the pr-validator since the temporary PR
+# branch is updated with a merge commit.
+merge_queue:
+  max_parallel_checks: 1
+
 pull_request_rules:
-  - name: remove outdated approved reviews
-    conditions:
-      - author!=@chaos-developers
-    actions:
-      dismiss_reviews:
-        approved: true
-        changes_requested: false
-        message: |
-          Approving reviews have been dismissed because this pull request
-          was updated.
-  - name: rebase and merge when passing all checks
-    conditions: []
-    actions:
-      queue:
+ - name: rebase and merge when passing all checks
+   conditions:
+     - base=master
+     - label="merge-when-passing"
+     - label!="work-in-progress"
+     - -title!=^\[*[Ww][Ii][Pp]
+     - "approved-reviews-by=@chaos/chaos-developers"
+     - "#approved-reviews-by>0"
+     - "#changes-requested-reviews-by=0"
+   actions:
+     queue:
+       name: default
+ - name: remove outdated approved reviews
+   conditions:
+     - author!=@chaos-developers
+   actions:
+     dismiss_reviews:
+       approved: true
+       changes_requested: false
+       message: |
+         Approving reviews have been dismissed because this pull request
+         was updated.
