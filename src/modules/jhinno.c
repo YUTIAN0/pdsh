@@ -234,6 +234,13 @@ static hostlist_t _jhinno_wcoll_from_jobid(const char *jobid)
                 hostname[len] = '\0';
             }
             
+            /* Trim trailing whitespace from hostname */
+            while (strlen(hostname) > 0 && 
+                   (hostname[strlen(hostname) - 1] == ' ' || 
+                    hostname[strlen(hostname) - 1] == '\t')) {
+                hostname[strlen(hostname) - 1] = '\0';
+            }
+            
             /* Skip empty hostnames and "-" (waiting jobs) */
             if (strlen(hostname) > 0 && strcmp(hostname, "-") != 0) {
                 if (hl == NULL) {
