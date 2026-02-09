@@ -234,8 +234,8 @@ static hostlist_t _jhinno_wcoll_from_jobid(const char *jobid)
                 hostname[len] = '\0';
             }
             
-            /* Skip empty hostnames */
-            if (strlen(hostname) > 0) {
+            /* Skip empty hostnames and "-" (waiting jobs) */
+            if (strlen(hostname) > 0 && strcmp(hostname, "-") != 0) {
                 if (hl == NULL) {
                     hl = hostlist_create(hostname);
                     if (hl == NULL) {
@@ -457,6 +457,70 @@ static hostlist_t _jhinno_wcoll_all(void)
 }
 
 /*
+ * Parse JH_HOSTS environment variable
+ * Format: "hostname1 corecount hostname2 corecount hostname3 corecount..."
+ * Example: "ev-hpc-test02 128 ev-hpc-test01 128"
+ */
+static hostlist_t _jhinno_wcoll_from_jh_hosts(void)
+{
+    char *env_var = getenv("JH_HOSTS");
+    hostlist_t hl = NULL;
+    char *copy = NULL;
+    char *token = NULL;
+    int ret;
+    int is_hostname = 1;  /* Start with hostname (odd position) */
+    
+    if (env_var == NULL || env_var[0] == '\0') {
+        return NULL;
+    }
+    
+    /* Make a copy since strtok modifies the string */
+    copy = strdup(env_var);
+    if (copy == NULL) {
+        err("%p: jhinno: Failed to allocate memory for JH_HOSTS\n");
+        return NULL;
+    }
+    
+    /* Parse: hostname corecount hostname corecount ... */
+    token = strtok(copy, " \t");
+    while (token != NULL) {
+        /* Every odd token is a hostname, even token is corecount (skip) */
+        if (strlen(token) > 0) {
+            if (is_hostname) {
+                /* This is a hostname */
+                if (hl == NULL) {
+                    hl = hostlist_create(token);
+                    if (hl == NULL) {
+                        err("%p: jhinno: Failed to create hostlist\n");
+                        free(copy);
+                        return NULL;
+                    }
+                } else {
+                    ret = hostlist_push_host(hl, token);
+                    if (ret < 0) {
+                        err("%p: jhinno: Failed to add host to list\n");
+                    }
+                }
+                is_hostname = 0;  /* Next token is corecount */
+            } else {
+                /* This is corecount, skip it */
+                is_hostname = 1;  /* Next token is hostname */
+            }
+        }
+        
+        token = strtok(NULL, " \t");
+    }
+    
+    if (copy)
+        free(copy);
+    
+    if (hl)
+        hostlist_uniq(hl);
+    
+    return hl;
+}
+
+/*
  * Main function to get node list from various sources
  */
 static int mod_jhinno_wcoll(opt_t *opt)
@@ -467,6 +531,8 @@ static int mod_jhinno_wcoll(opt_t *opt)
     char *job = NULL;
     int ret;
     
+    (void)ret;  /* Suppress unused variable warning */
+    
     if (job_list && opt->wcoll) {
         errx("%p: do not specify -j with any other node selection option.\n");
     }
@@ -475,20 +541,30 @@ static int mod_jhinno_wcoll(opt_t *opt)
      * Priority:
      * 1. -j options
      * 2. environment variable JOBS_JOBID
+     * 3. environment variable JH_HOSTS
      */
+    
+    /* First, try JH_HOSTS environment variable */
     if (job_list == NULL) {
-        char *env_var = getenv("JOBS_JOBID");
-        if (env_var == NULL) {
+        hl = _jhinno_wcoll_from_jh_hosts();
+        if (hl != NULL) {
+            opt->wcoll = hl;
             return 0;
         }
-        
-        /* Parse single jobid from env var */
-        if (_is_jobid_numeric(env_var)) {
-            hl = _jhinno_wcoll_from_jobid(env_var);
-        } else if (strcmp(env_var, "all") == 0) {
-            hl = _jhinno_wcoll_all();
-        } else {
-            hl = _jhinno_wcoll_from_group(env_var);
+    }
+    
+    /* Then try JOBS_JOBID or -j options */
+    if (job_list == NULL) {
+        char *env_var = getenv("JOBS_JOBID");
+        if (env_var != NULL) {
+            /* Parse single jobid from env var */
+            if (_is_jobid_numeric(env_var)) {
+                hl = _jhinno_wcoll_from_jobid(env_var);
+            } else if (strcmp(env_var, "all") == 0) {
+                hl = _jhinno_wcoll_all();
+            } else {
+                hl = _jhinno_wcoll_from_group(env_var);
+            }
         }
     } else {
         /* Process list of jobs/groups */

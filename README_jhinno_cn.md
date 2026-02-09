@@ -14,7 +14,9 @@ jhinno 模块将 pdsh 与 jhinno 作业调度器集成，允许您在由 jhinno 
 - **查询所有节点**：获取集群中所有正常节点（特殊值：`all`）
 - **过滤UNKNOWN节点**：默认自动跳过状态为 `UNKNOWN` 的节点
 - **包含UNKNOWN节点**：选项可包含状态为UNKNOWN的节点
+- **过滤等待作业**：自动跳过没有分配节点的作业（EXEC_HOST = "-"）
 - **环境变量支持**：设置 `JOBS_JOBID` 来指定默认作业ID或节点组
+- **显式主机列表支持**：设置 `JH_HOSTS` 来指定带有核数的自定义节点列表
 
 ## 安装
 
@@ -81,6 +83,17 @@ pdsh -j all --jhinno-include-unknown hostname
 export JOBS_JOBID=64882
 pdsh hostname
 ```
+
+#### 6. 使用JH_HOSTS环境变量
+
+设置 `JH_HOSTS` 环境变量来指定自定义节点列表。格式为"主机名 核数 主机名 核数..."：
+
+```bash
+export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
+pdsh hostname
+```
+
+当您想手动指定节点及其核数而不查询作业调度器时，这非常有用。核数值仅供参考 - 模块提取主机名并忽略核数。
 
 ### 高级用法
 
@@ -158,6 +171,61 @@ hpc-gpu-node06 UNKNOWN  UNKNOWN      -        -        -       -     -       -  
    pdsh -j all --jhinno-include-unknown hostname
    ```
 
+## 等待作业处理
+
+当作业处于等待状态（尚未分配给任何节点）时，`jjobs` 命令返回：
+
+```
+EXEC_HOST
+-
+```
+
+jhinno 模块自动检测并过滤此类作业 - 如果作业没有分配节点（EXEC_HOST = "-"），它将导致空节点列表，pdsh 将报告"未指定远程主机"。这防止尝试在不存在的节点上执行命令。
+
+### 示例
+
+```bash
+# 查询等待作业（没有分配节点）
+pdsh -j 62568 hostname
+# 输出: pdsh@host: no remote hosts specified
+
+# 查询运行作业（有分配节点）
+pdsh -j 64882 hostname
+# 输出: 在所有分配节点上执行
+```
+
+## 环境变量
+
+jhinno 模块支持两个环境变量：
+
+### JOBS_JOBID
+
+指定默认作业ID或节点组。当命令行上没有提供 `-j` 选项时使用。
+
+```bash
+export JOBS_JOBID=64882
+pdsh hostname  # 等同于: pdsh -j 64882 hostname
+```
+
+### JH_HOSTS
+
+指定带有核数的自定义主机列表。当您想直接提供节点信息而不查询作业调度器时使用。
+
+**格式**: "主机名1 核数 主机名2 核数 主机名3 核数..."
+**示例**: "ev-hpc-test01 128 ev-hpc-test02 128"
+
+```bash
+export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
+pdsh hostname  # 在 ev-hpc-test01 和 ev-hpc-test02 上执行
+```
+
+**优先级**: 
+1. `-j` 命令行选项（最高优先级）
+2. `JOBS_JOBID` 环境变量（中等优先级）
+3. `JH_HOSTS` 环境变量（最低优先级）
+
+如果在命令行上指定 `-j`，它将覆盖两个环境变量。如果未指定 `-j`，模块首先检查 `JH_HOSTS`，然后检查 `JOBS_JOBID`。
+
 ## 模块冲突
 
 jhinno 模块与以下模块冲突，因为它们使用相同的 `-j` 选项：
@@ -190,7 +258,7 @@ EXEC_HOST
 64*ev-hpc-compute098:64*ev-hpc-compute164:64*ev-hpc-compute171
 ```
 
-模块从这种格式中提取节点名称，忽略数字前缀（CPU数量）。
+模块从这种格式中提取节点名称，忽略数字前缀（CPU数量）。如果 EXEC_HOST 是 "-"（等待作业），则不返回任何节点。
 
 对于节点组或所有节点，模块执行：
 ```bash
@@ -204,6 +272,16 @@ ev-hpc-test02 LINUX64  AMD64      128  385816M       0K       2    64       1   
 ```
 
 模块提取第一列（HOST_NAME），并过滤掉第二列（type）为 `UNKNOWN` 的行。
+
+### JH_HOSTS 解析
+
+当设置 `JH_HOSTS` 时，模块以"主机名 核数 主机名 核数..."的格式解析字符串：
+
+```c
+JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
+```
+
+模块从奇数位置（第1、第3、第5、...）提取主机名，并忽略偶数位置（第2、第4、第6、...）的核数。
 
 ## 故障排除
 
@@ -236,19 +314,26 @@ make install
 
 如果pdsh报告未找到节点：
 
-1. 验证作业ID是否有效：
+1. **对于作业查询**：验证作业ID是否有效，并检查作业是否在等待：
    ```bash
-   jjobs | grep <jobid>
+   jjobs -o exec_host:4096 <jobid>
+   # 如果输出是"-"，作业正在等待且没有分配节点
    ```
 
-2. 检查节点是否为UNKNOWN状态：
+2. **对于节点组查询**：检查节点是否为UNKNOWN状态：
    ```bash
    jhosts attrib -w | grep UNKNOWN
    ```
 
-3. 尝试包含UNKNOWN节点：
+3. **尝试包含UNKNOWN节点**：
    ```bash
    pdsh -j all --jhinno-include-unknown -n
+   ```
+
+4. **检查作业是否在等待**：
+   ```bash
+   pdsh -j <jobid> hostname
+   # 如果输出是"no remote hosts specified"，作业可能在等待
    ```
 
 ### 权限被拒绝
@@ -258,6 +343,22 @@ make install
 1. 检查您的身份验证方法（rsh、ssh等）
 2. 确保您在目标节点上有适当的权限
 3. 如果使用SSH，验证SSH密钥已正确配置
+
+### 显式主机列表不工作
+
+如果 `JH_HOSTS` 不工作：
+
+1. 验证格式正确："主机名 核数 主机名 核数..."
+   ```bash
+   # 正确
+   export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
+   
+   # 错误（缺少核数）
+   export JH_HOSTS="ev-hpc-test01 ev-hpc-test02"
+   ```
+
+2. 确保主机名用空格分隔
+3. 如果使用 `-j` 选项，它将覆盖 `JH_HOSTS`
 
 ## 示例
 
@@ -316,6 +417,33 @@ pdsh -j all "netstat -an | grep ESTABLISHED | wc -l"
 pdsh -j all "ps aux | wc -l"
 ```
 
+### 示例5：使用JH_HOSTS创建自定义节点列表
+
+```bash
+# 在特定节点上执行而不查询作业调度器
+export JH_HOSTS="node1 64 node2 64 node3 128"
+pdsh "uptime"
+
+# 用于测试或作业调度器不可用时
+export JH_HOSTS="test-node01 32 test-node02 32"
+pdsh "hostname"
+```
+
+### 示例6：等待作业检测
+
+```bash
+# 测试等待作业
+pdsh -j 62568 hostname
+# 如果输出: "pdsh@host: no remote hosts specified"
+# 作业62568正在等待且没有分配节点
+
+# 直接检查作业状态
+jjobs -o exec_host:4096 62568
+# 输出:
+# EXEC_HOST
+# -
+```
+
 ## 性能考虑
 
 - 该模块为每个查询执行外部命令（`jjobs` 或 `jhosts`）
@@ -354,8 +482,13 @@ jhinno模块是pdsh的一部分，根据GNU通用公共许可证（GPL）授权�
 
 ## 版本历史
 
+- **1.1** - 增强功能
+  - 自动过滤等待作业（EXEC_HOST = "-"）
+  - JH_HOSTS环境变量支持显式主机列表
+  - 改进对没有分配节点的作业的错误处理
+  
 - **1.0** - 初始版本
   - 支持jjobs和jhosts命令
   - 作业ID和节点组查询
   - 自动UNKNOWN节点过滤
-  - 环境变量支持
+  - 环境变量支持（JOBS_JOBID）

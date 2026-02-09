@@ -14,7 +14,9 @@ The jhinno module integrates pdsh with the jhinno job scheduler, allowing you to
 - **Query All Nodes**: Get all normal nodes in the cluster (special value: `all`)
 - **Filter Unknown Nodes**: Automatically skips nodes with `UNKNOWN` status by default
 - **Include Unknown Nodes**: Option to include unknown nodes in queries
+- **Filter Waiting Jobs**: Automatically skips jobs with no allocated nodes (EXEC_HOST = "-")
 - **Environment Variable Support**: Set `JOBS_JOBID` to specify default job ID or node group
+- **Explicit Host List Support**: Set `JH_HOSTS` to specify a custom node list with core counts
 
 ## Installation
 
@@ -81,6 +83,17 @@ Set the `JOBS_JOBID` environment variable to specify a default job ID:
 export JOBS_JOBID=64882
 pdsh hostname
 ```
+
+#### 6. Using JH_HOSTS Environment Variable
+
+Set the `JH_HOSTS` environment variable to specify a custom node list. The format is "hostname corecount hostname corecount...":
+
+```bash
+export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
+pdsh hostname
+```
+
+This is useful when you want to manually specify nodes and their CPU counts without querying the job scheduler. The core count values are informational only - the module extracts the hostnames and ignores the CPU counts.
 
 ### Advanced Usage
 
@@ -158,6 +171,61 @@ hpc-gpu-node06 UNKNOWN  UNKNOWN      -        -        -       -     -       -  
    pdsh -j all --jhinno-include-unknown hostname
    ```
 
+## Waiting Job Handling
+
+When a job is in waiting status (not yet allocated to any nodes), the `jjobs` command returns:
+
+```
+EXEC_HOST
+-
+```
+
+The jhinno module automatically detects and filters such jobs - if a job has no allocated nodes (EXEC_HOST = "-"), it will result in an empty node list, and pdsh will report "no remote hosts specified". This prevents attempts to execute commands on non-existent nodes.
+
+### Example
+
+```bash
+# Query a waiting job (no allocated nodes)
+pdsh -j 62568 hostname
+# Output: pdsh@host: no remote hosts specified
+
+# Query a running job (with allocated nodes)
+pdsh -j 64882 hostname
+# Output: executes on all allocated nodes
+```
+
+## Environment Variables
+
+The jhinno module supports two environment variables:
+
+### JOBS_JOBID
+
+Specifies a default job ID or node group. This is used when no `-j` option is provided on the command line.
+
+```bash
+export JOBS_JOBID=64882
+pdsh hostname  # Equivalent to: pdsh -j 64882 hostname
+```
+
+### JH_HOSTS
+
+Specifies a custom host list with core counts. This is used when you want to provide node information directly without querying the job scheduler.
+
+**Format**: "hostname1 corecount hostname2 corecount hostname3 corecount..."
+**Example**: "ev-hpc-test01 128 ev-hpc-test02 128"
+
+```bash
+export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
+pdsh hostname  # Executes on ev-hpc-test01 and ev-hpc-test02
+```
+
+**Priority**: 
+1. `-j` command-line option (highest priority)
+2. `JOBS_JOBID` environment variable (medium priority)
+3. `JH_HOSTS` environment variable (lowest priority)
+
+If `-j` is specified on the command line, it overrides both environment variables. If `-j` is not specified, the module first checks `JH_HOSTS`, then `JOBS_JOBID`.
+
 ## Module Conflicts
 
 The jhinno module conflicts with the following modules because they use the same `-j` option:
@@ -190,7 +258,7 @@ EXEC_HOST
 64*ev-hpc-compute098:64*ev-hpc-compute164:64*ev-hpc-compute171
 ```
 
-The module extracts node names from this format, ignoring the numeric prefix (CPU count).
+The module extracts node names from this format, ignoring the numeric prefix (CPU count). If the EXEC_HOST is "-" (waiting job), no nodes are returned.
 
 For job groups or all nodes, the module executes:
 ```bash
@@ -204,6 +272,16 @@ ev-hpc-test02 LINUX64  AMD64      128  385816M       0K       2    64       1   
 ```
 
 The module extracts the first column (HOST_NAME) and filters out rows where the second column (type) is `UNKNOWN`.
+
+### JH_HOSTS Parsing
+
+When `JH_HOSTS` is set, the module parses the string in the format "hostname corecount hostname corecount...":
+
+```c
+JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
+```
+
+The module extracts hostnames from odd positions (1st, 3rd, 5th, ...) and ignores core counts from even positions (2nd, 4th, 6th, ...).
 
 ## Troubleshooting
 
@@ -236,19 +314,26 @@ If you get errors about `jjobs` or `jhosts` commands not found:
 
 If pdsh reports no nodes found:
 
-1. Verify the job ID is valid:
+1. **For job queries**: Verify the job ID is valid and check if the job is waiting:
    ```bash
-   jjobs | grep <jobid>
+   jjobs -o exec_host:4096 <jobid>
+   # If output is "-", the job is waiting and has no allocated nodes
    ```
 
-2. Check if nodes are in UNKNOWN status:
+2. **For job group queries**: Check if nodes are in UNKNOWN status:
    ```bash
    jhosts attrib -w | grep UNKNOWN
    ```
 
-3. Try including unknown nodes:
+3. **Try including unknown nodes**:
    ```bash
    pdsh -j all --jhinno-include-unknown -n
+   ```
+
+4. **Check if a job is waiting**:
+   ```bash
+   pdsh -j <jobid> hostname
+   # If output is "no remote hosts specified", the job may be waiting
    ```
 
 ### Permission Denied
@@ -258,6 +343,22 @@ If you get permission denied errors:
 1. Check your authentication method (rsh, ssh, etc.)
 2. Ensure you have proper permissions on the target nodes
 3. Verify SSH keys are properly configured if using SSH
+
+### Explicit Host List Not Working
+
+If `JH_HOSTS` doesn't work:
+
+1. Verify the format is correct: "hostname corecount hostname corecount..."
+   ```bash
+   # Correct
+   export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
+   
+   # Incorrect (missing core count)
+   export JH_HOSTS="ev-hpc-test01 ev-hpc-test02"
+   ```
+
+2. Make sure hostnames are separated by spaces
+3. If using `-j` option, it will override `JH_HOSTS`
 
 ## Examples
 
@@ -316,6 +417,33 @@ pdsh -j all "netstat -an | grep ESTABLISHED | wc -l"
 pdsh -j all "ps aux | wc -l"
 ```
 
+### Example 5: Using JH_HOSTS for Custom Node Lists
+
+```bash
+# Execute on specific nodes without querying job scheduler
+export JH_HOSTS="node1 64 node2 64 node3 128"
+pdsh "uptime"
+
+# Useful for testing or when job scheduler is unavailable
+export JH_HOSTS="test-node01 32 test-node02 32"
+pdsh "hostname"
+```
+
+### Example 6: Waiting Job Detection
+
+```bash
+# Test a job that is waiting
+pdsh -j 62568 hostname
+# If output: "pdsh@host: no remote hosts specified"
+# The job 62568 is waiting and has no allocated nodes
+
+# Check job status directly
+jjobs -o exec_host:4096 62568
+# Output:
+# EXEC_HOST
+# -
+```
+
 ## Performance Considerations
 
 - The module executes external commands (`jjobs` or `jhosts`) for each query
@@ -354,8 +482,13 @@ For issues, questions, or contributions:
 
 ## Version History
 
+- **1.1** - Enhanced features
+  - Automatic filtering of waiting jobs (EXEC_HOST = "-")
+  - JH_HOSTS environment variable support for explicit host lists
+  - Improved error handling for jobs with no allocated nodes
+  
 - **1.0** - Initial release
   - Support for jjobs and jhosts commands
   - Job ID and job group queries
   - Automatic UNKNOWN node filtering
-  - Environment variable support
+  - Environment variable support (JOBS_JOBID)
