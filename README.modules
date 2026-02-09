@@ -77,3 +77,9 @@ Module:      misc/netgroup
 Package:     pdsh-mod-netgroup
 Description: Allows list of targets to be build from netgroups.
 Conflicts:   misc/genders, misc/dshgroup, misc/nodeattr
+
+Module:      misc/jhinno
+Package:     pdsh-mod-jhinno
+Description: Allows list of targets to be built from jhinno job scheduler via jhosts/jjobs
+Conflicts:   misc/slurm, misc/torque
+Requires:    jjobs, jhosts commands

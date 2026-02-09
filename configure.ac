@@ -183,6 +183,12 @@ AC_TORQUE
 AM_CONDITIONAL([WITH_TORQUE], [test "$ac_have_torque" = "yes"])
 
 #
+# Determine whether to build jhinno module (support jhinno job scheduler via jhosts/jjobs)
+#
+AC_JHINNO
+AM_CONDITIONAL([WITH_JHINNO], [test "$ac_have_jhinno" = "yes"])
+
+#
 # Determine whether to build dshgroup module 
 # (support dsh-style /etc/dsh/group/%s ~/.dsh/group/%s files)
 #

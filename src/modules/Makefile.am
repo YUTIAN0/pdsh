@@ -51,6 +51,10 @@ if WITH_TORQUE
 TORQUE_MODULE = torque.la
 endif
 
+if WITH_JHINNO
+JHINNO_MODULE = jhinno.la
+endif
+
 if WITH_DSHGROUP
 DSHGROUP_MODULE = dshgroup.la
 endif
@@ -91,6 +95,7 @@ pkglib_LTLIBRARIES = \
 	$(KRB4_MODULE) \
 	$(SLURM_MODULE) \
 	$(TORQUE_MODULE) \
+	$(JHINNO_MODULE) \
 	$(DSHGROUP_MODULE) \
 	$(NETGROUP_MODULE) \
 	$(EXEC_MODULE)
@@ -108,16 +113,18 @@ nodist_libmods_la_SOURCES = \
 EXTRA_libmods_la_SOURCES = \
 	xrcmd.c \
 	sshcmd.c \
-	mcmd.c  \
+	mcmd.c \
 	genders.c \
 	nodeupdown.c \
 	machines.c \
 	k4cmd.c \
 	slurm.c \
+	torque.c \
+	jhinno.c \
 	dshgroup.c \
 	netgroup.c \
 	xcpucmd.c \
-	execcmd.c 
+	execcmd.c
 
 libmods_la_LDFLAGS = \
 	$(MRSH_LIBS) \
@@ -156,6 +163,8 @@ dshgroup_la_SOURCES =     dshgroup.c
 dshgroup_la_LDFLAGS =     $(MODULE_FLAGS) 
 netgroup_la_SOURCES =     netgroup.c 
 netgroup_la_LDFLAGS =     $(MODULE_FLAGS) 
+jhinno_la_SOURCES =       jhinno.c
+jhinno_la_LDFLAGS =       $(MODULE_FLAGS)
 
 $(VERSION_SCRIPT) : 
 	(echo  "{ global:";                \

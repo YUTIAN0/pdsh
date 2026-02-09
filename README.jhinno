@@ -1,0 +1,361 @@
+# JHINNO Module for pdsh
+
+## Overview
+
+The jhinno module integrates pdsh with the jhinno job scheduler, allowing you to execute commands on nodes managed by jhinno. This module supports querying nodes via two commands:
+
+- `jjobs` - Query node information by job ID (numeric job identifier), returns the execution nodes allocated to the job
+- `jhosts` - Query node and node group information, returns nodes belonging to a node group or all nodes in the cluster
+
+## Features
+
+- **Query by Job ID**: Get execution nodes allocated to a specific job using numeric job IDs (via jjobs)
+- **Query by Node Group**: Get nodes belonging to a specific node group using alphanumeric group identifiers (via jhosts)
+- **Query All Nodes**: Get all normal nodes in the cluster (special value: `all`)
+- **Filter Unknown Nodes**: Automatically skips nodes with `UNKNOWN` status by default
+- **Include Unknown Nodes**: Option to include unknown nodes in queries
+- **Environment Variable Support**: Set `JOBS_JOBID` to specify default job ID or node group
+
+## Installation
+
+### Building with jhinno Support
+
+To build pdsh with jhinno module support:
+
+```bash
+./configure --with-jhinno
+make
+make install
+```
+
+### Requirements
+
+The jhinno module requires the following commands to be available in your PATH:
+
+- `jjobs` - Command to query job allocations
+- `jhosts` - Command to query node statuses
+
+## Usage
+
+### Basic Usage
+
+#### 1. Query by Numeric Job ID
+
+Get nodes allocated to a specific job:
+
+```bash
+pdsh -j 64882 hostname
+```
+
+This executes the `hostname` command on all nodes allocated to job ID 64882.
+
+#### 2. Query by Node Group
+
+Get nodes belonging to a specific node group:
+
+```bash
+pdsh -j c9A75 hostname
+```
+
+#### 3. Query All Normal Nodes
+
+Get all nodes with normal status (filters out UNKNOWN nodes):
+
+```bash
+pdsh -j all hostname
+```
+
+#### 4. Include Unknown Nodes
+
+Include nodes with UNKNOWN status in the query:
+
+```bash
+pdsh -j all --jhinno-include-unknown hostname
+```
+
+#### 5. Using Environment Variable
+
+Set the `JOBS_JOBID` environment variable to specify a default job ID:
+
+```bash
+export JOBS_JOBID=64882
+pdsh hostname
+```
+
+### Advanced Usage
+
+#### Multiple Jobs
+
+Query multiple jobs or job groups:
+
+```bash
+pdsh -j 64882,64883,64884 hostname
+```
+
+Or mix job IDs and node groups:
+
+```bash
+pdsh -j 64882,c9A75,c9A76 hostname
+```
+
+**Important**: When querying multiple jobs or mixing jjobs and jhosts sources, the module automatically handles duplicate nodes. For example, if a node appears in both a job ID query and a node group query, it will only be executed once. The final node list is deduplicated after merging all sources.
+
+#### Command Execution
+
+Execute commands on nodes:
+
+```bash
+# Check system load
+pdsh -j all "uptime"
+
+# Run multiple commands
+pdsh -j all "df -h && free -m"
+
+# Check disk space
+pdsh -j all "du -sh /var/log"
+
+# List running processes
+pdsh -j all "ps aux | grep myapp"
+```
+
+#### Quiet Mode
+
+Suppress the hostname prefix on output:
+
+```bash
+pdsh -j all -q "hostname"
+```
+
+#### Limited Output
+
+Check if nodes are responsive:
+
+```bash
+pdsh -j all -n
+```
+
+## Node Status Filtering
+
+The jhinno module automatically filters out nodes with `UNKNOWN` status when using `-j all` or job group queries. This is the default behavior.
+
+### Example of Unknown Nodes
+
+Nodes with status like this are filtered by default:
+
+```
+hpc-gpu-node06 UNKNOWN  UNKNOWN      -        -        -       -     -       -     - -
+```
+
+### Filtering Options
+
+1. **Default**: Filter out UNKNOWN nodes
+   ```bash
+   pdsh -j all hostname
+   ```
+
+2. **Include Unknown**: Include all nodes regardless of status
+   ```bash
+   pdsh -j all --jhinno-include-unknown hostname
+   ```
+
+## Module Conflicts
+
+The jhinno module conflicts with the following modules because they use the same `-j` option:
+
+- `slurm` module
+- `torque` module
+
+**Important**: Do not enable jhinno, slurm, and torque modules simultaneously.
+
+## Internals
+
+### Job ID Detection
+
+The module automatically detects the type of job identifier:
+
+- **Numeric** (e.g., `64882`) → Uses `jjobs` command
+- **Alphanumeric** (e.g., `c9A75`) → Uses `jhosts` command
+- **Special value `all`** → Uses `jhosts` command to get all nodes
+
+### Command Execution
+
+For numeric job IDs, the module executes:
+```bash
+jjobs -o exec_host:4096 <jobid>
+```
+
+Output format:
+```
+EXEC_HOST
+64*ev-hpc-compute098:64*ev-hpc-compute164:64*ev-hpc-compute171
+```
+
+The module extracts node names from this format, ignoring the numeric prefix (CPU count).
+
+For job groups or all nodes, the module executes:
+```bash
+jhosts attrib -w <jobgroup>
+```
+
+Output format:
+```
+HOST_NAME    type     model    ncpus   maxmem  maxswap nsocket ncore nthread ngpus nnodes RESOURCES
+ev-hpc-test02 LINUX64  AMD64      128  385816M       0K       2    64       1     -      2 -
+```
+
+The module extracts the first column (HOST_NAME) and filters out rows where the second column (type) is `UNKNOWN`.
+
+## Troubleshooting
+
+### Module Not Found
+
+If you get an error about the jhinno module not being found:
+
+```bash
+# Check if module is loaded
+pdsh -L | grep jhinno
+
+# Rebuild with jhinno support
+./configure --with-jhinno
+make
+make install
+```
+
+### Commands Not Found
+
+If you get errors about `jjobs` or `jhosts` commands not found:
+
+1. Ensure jhinno job scheduler is installed
+2. Verify the commands are in your PATH:
+   ```bash
+   which jjobs jhosts
+   ```
+3. Configure the module with the correct paths
+
+### No Nodes Found
+
+If pdsh reports no nodes found:
+
+1. Verify the job ID is valid:
+   ```bash
+   jjobs | grep <jobid>
+   ```
+
+2. Check if nodes are in UNKNOWN status:
+   ```bash
+   jhosts attrib -w | grep UNKNOWN
+   ```
+
+3. Try including unknown nodes:
+   ```bash
+   pdsh -j all --jhinno-include-unknown -n
+   ```
+
+### Permission Denied
+
+If you get permission denied errors:
+
+1. Check your authentication method (rsh, ssh, etc.)
+2. Ensure you have proper permissions on the target nodes
+3. Verify SSH keys are properly configured if using SSH
+
+## Examples
+
+### Example 1: Check System Information
+
+```bash
+# Get uname from all nodes
+pdsh -j all "uname -a"
+
+# Check kernel version
+pdsh -j all "uname -r"
+
+# Check distribution
+pdsh -j all "cat /etc/os-release | grep PRETTY_NAME"
+```
+
+### Example 2: System Maintenance
+
+```bash
+# Check disk space on all nodes
+pdsh -j all "df -h"
+
+# Check memory usage
+pdsh -j all "free -h"
+
+# Check running services
+pdsh -j all "systemctl list-units --type=service --state=running"
+
+# Check system logs
+pdsh -j all "tail -20 /var/log/syslog"
+```
+
+### Example 3: Application Deployment
+
+```bash
+# Copy file to job nodes
+pdcp -j 64882 /local/myapp /opt/
+
+# Install package
+pdsh -j 64882 "yum install -y myapp"
+
+# Restart service
+pdsh -j 64882 "systemctl restart myapp"
+```
+
+### Example 4: Monitoring
+
+```bash
+# Check CPU load
+pdsh -j all "uptime"
+
+# Check network connections
+pdsh -j all "netstat -an | grep ESTABLISHED | wc -l"
+
+# Check process count
+pdsh -j all "ps aux | wc -l"
+```
+
+## Performance Considerations
+
+- The module executes external commands (`jjobs` or `jhosts`) for each query
+- For large clusters, consider caching results or limiting the number of nodes
+- Adjust the fanout (`-f` option) based on your network capacity:
+  ```bash
+  pdsh -j all -f 64 "hostname"
+  ```
+
+## Security Considerations
+
+- Ensure proper authentication is configured (SSH keys, rhosts, etc.)
+- Be cautious when running commands with elevated privileges
+- Review the output before executing commands on production systems
+- Test on a subset of nodes before running on the entire cluster
+
+## Contributing
+
+To contribute improvements to the jhinno module:
+
+1. Fork the pdsh repository
+2. Make your changes
+3. Test thoroughly
+4. Submit a pull request
+
+## License
+
+The jhinno module is part of pdsh and is licensed under the GNU General Public License (GPL).
+
+## Support
+
+For issues, questions, or contributions:
+
+- GitHub: https://github.com/chaos/pdsh
+- Mailing List: pdsh-users@lists.sourceforge.net
+
+## Version History
+
+- **1.0** - Initial release
+  - Support for jjobs and jhosts commands
+  - Job ID and job group queries
+  - Automatic UNKNOWN node filtering
+  - Environment variable support
