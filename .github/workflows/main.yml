@@ -30,6 +30,7 @@ jobs:
         ./bootstrap &&
         ./configure --with-ssh --with-exec --with-netgroup
         --with-dshgroups --with-genders --with-machines --with-slurm
+        --with-jhinno
     - name: make
       run: make -j 2 CFLAGS="-Werror"
     - name: make check
@@ -51,6 +52,7 @@ jobs:
       run: >
         ./bootstrap &&
         ./configure --with-ssh --with-exec --with-netgroup --with-dshgroups
+        --with-jhinno
     - name: make check
       run: make -j 2 check
 
@@ -72,6 +74,7 @@ jobs:
         ./bootstrap &&
         ./configure --with-ssh --with-exec --with-netgroup
         --with-dshgroups --with-genders --with-machines
+        --with-jhinno
         --enable-code-coverage
     - name: make check-code-coverage
       run: make check-code-coverage
