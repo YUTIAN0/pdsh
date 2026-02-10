@@ -12,6 +12,7 @@ jhinno 模块将 pdsh 与 jhinno 作业调度器集成，允许您在由 jhinno 
 - **按作业ID查询**：使用数字作业ID获取分配给特定作业的执行节点（通过jjobs）
 - **按节点组查询**：使用字母数字组标识符获取属于特定节点组的节点（通过jhosts）
 - **查询所有节点**：获取集群中所有正常节点（特殊值：`all`）
+- **节点筛选**：使用jhosts选择表达式筛选节点（通过 -F 选项）
 - **过滤UNKNOWN节点**：默认自动跳过状态为 `UNKNOWN` 的节点
 - **包含UNKNOWN节点**：选项可包含状态为UNKNOWN的节点
 - **过滤等待作业**：自动跳过没有分配节点的作业（EXEC_HOST = "-"）
@@ -84,16 +85,32 @@ export JOBS_JOBID=64882
 pdsh hostname
 ```
 
-#### 6. 使用JH_HOSTS环境变量
+#### 7. 使用选择表达式进行节点筛选
 
-设置 `JH_HOSTS` 环境变量来指定自定义节点列表。格式为"主机名 核数 主机名 核数..."：
+使用 `-F` 选项通过 jhosts 选择表达式筛选节点。这允许您根据节点属性选择节点：
 
 ```bash
-export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
-pdsh hostname
+# 按内存筛选节点（大于1000MB）
+pdsh -j all -F "select[mem>1000]" hostname
+
+# 筛选有GPU的节点
+pdsh -j all -F "select[gpus>0]" "nvidia-smi"
+
+# 使用多个条件筛选节点
+pdsh -j all -F "select[gpus>=2 && mem>2000]" "nvidia-smi"
+
+# 为特定组筛选节点
+pdsh -j c9A75 -F "select[cpus>=64]" hostname
 ```
 
-当您想手动指定节点及其核数而不查询作业调度器时，这非常有用。核数值仅供参考 - 模块提取主机名并忽略核数。
+`-F` 选项将表达式直接传递给 `jhosts -R`，支持基于资源、硬件属性或在您的 jhinno 集群中定义的自定义属性的强大节点选择。
+
+**注意**：`-F` 选项适用于：
+- `-j all`（所有节点）
+- `-j <nodegroup>`（特定节点组）
+- `-j all --jhinno-include-unknown`（包含带筛选的UNKNOWN节点）
+
+它**不**适用于数字作业ID（例如 `-j 64882`），因为这些作业已有固定分配。
 
 ### 高级用法
 
@@ -262,16 +279,32 @@ EXEC_HOST
 
 对于节点组或所有节点，模块执行：
 ```bash
-jhosts attrib -w <jobgroup>
+jhosts -w <jobgroup>
 ```
 
 输出格式：
 ```
-HOST_NAME    type     model    ncpus   maxmem  maxswap nsocket ncore nthread ngpus nnodes RESOURCES
-ev-hpc-test02 LINUX64  AMD64      128  385816M       0K       2    64       1     -      2 -
+HOST_NAME
+ev-hpc-test02
+ev-hpc-test03
+ev-hpc-test04
 ```
 
-模块提取第一列（HOST_NAME），并过滤掉第二列（type）为 `UNKNOWN` 的行。
+模块从每行提取主机名。`jhosts -w` 命令只返回主机名，不返回详细属性。
+
+当使用 `-F` 选项进行筛选时，模块执行：
+```bash
+jhosts -w [nodegroup] -R "<filter_expression>"
+```
+
+例如，使用 `-F "select[mem>1000]"`，命令变为：
+```bash
+jhosts -w -R "select[mem>1000]"
+```
+
+这将筛选表达式直接传递给 jhosts，jhosts 根据指定的条件（如内存、GPU、CPU数量等）执行节点选择。
+
+**注意**：`-F` 选项仅适用于使用 `jhosts` 命令时（节点组或所有节点）。它不适用于数字作业ID，因为这些作业已有固定的节点分配。
 
 ### JH_HOSTS 解析
 
@@ -482,6 +515,11 @@ jhinno模块是pdsh的一部分，根据GNU通用公共许可证（GPL）授权�
 
 ## 版本历史
 
+- **1.2** - 节点筛选支持
+  - 添加 `-F` 选项用于 jhosts 选择表达式（例如 `-F "select[mem>1000]"`）
+  - 将 jhosts 命令格式从 `jhosts attrib -w` 更改为 `jhosts -w`
+  - 支持按属性筛选节点（内存、GPU、CPU等）
+  
 - **1.1** - 增强功能
   - 自动过滤等待作业（EXEC_HOST = "-"）
   - JH_HOSTS环境变量支持显式主机列表

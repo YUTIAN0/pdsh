@@ -12,6 +12,7 @@ The jhinno module integrates pdsh with the jhinno job scheduler, allowing you to
 - **Query by Job ID**: Get execution nodes allocated to a specific job using numeric job IDs (via jjobs)
 - **Query by Node Group**: Get nodes belonging to a specific node group using alphanumeric group identifiers (via jhosts)
 - **Query All Nodes**: Get all normal nodes in the cluster (special value: `all`)
+- **Node Filtering**: Filter nodes using jhosts selection expressions (via -F option)
 - **Filter Unknown Nodes**: Automatically skips nodes with `UNKNOWN` status by default
 - **Include Unknown Nodes**: Option to include unknown nodes in queries
 - **Filter Waiting Jobs**: Automatically skips jobs with no allocated nodes (EXEC_HOST = "-")
@@ -94,6 +95,33 @@ pdsh hostname
 ```
 
 This is useful when you want to manually specify nodes and their CPU counts without querying the job scheduler. The core count values are informational only - the module extracts the hostnames and ignores the CPU counts.
+
+#### 7. Node Filtering with Selection Expressions
+
+Filter nodes using jhosts selection expressions via the `-F` option. This allows you to select nodes based on their attributes:
+
+```bash
+# Filter nodes by memory (greater than 1000MB)
+pdsh -j all -F "select[mem>1000]" hostname
+
+# Filter nodes with GPUs
+pdsh -j all -F "select[gpus>0]" "nvidia-smi"
+
+# Filter nodes with multiple conditions
+pdsh -j all -F "select[gpus>=2 && mem>2000]" "nvidia-smi"
+
+# Filter nodes for a specific group
+pdsh -j c9A75 -F "select[cpus>=64]" hostname
+```
+
+The `-F` option passes the expression directly to `jhosts -R`, enabling powerful node selection based on resources, hardware attributes, or custom properties defined in your jhinno cluster.
+
+**Note**: The `-F` option works with:
+- `-j all` (all nodes)
+- `-j <nodegroup>` (specific node groups)
+- `-j all --jhinno-include-unknown` (include unknown nodes with filter)
+
+It does NOT apply to numeric job IDs (e.g., `-j 64882`) because those jobs already have fixed allocations.
 
 ### Advanced Usage
 
@@ -262,16 +290,32 @@ The module extracts node names from this format, ignoring the numeric prefix (CP
 
 For job groups or all nodes, the module executes:
 ```bash
-jhosts attrib -w <jobgroup>
+jhosts -w <jobgroup>
 ```
 
 Output format:
 ```
-HOST_NAME    type     model    ncpus   maxmem  maxswap nsocket ncore nthread ngpus nnodes RESOURCES
-ev-hpc-test02 LINUX64  AMD64      128  385816M       0K       2    64       1     -      2 -
+HOST_NAME
+ev-hpc-test02
+ev-hpc-test03
+ev-hpc-test04
 ```
 
-The module extracts the first column (HOST_NAME) and filters out rows where the second column (type) is `UNKNOWN`.
+The module extracts the hostname from each line. The `jhosts -w` command returns only hostnames, not detailed attributes.
+
+When using the `-F` option for filtering, the module executes:
+```bash
+jhosts -w [nodegroup] -R "<filter_expression>"
+```
+
+For example, with `-F "select[mem>1000]"`, the command becomes:
+```bash
+jhosts -w -R "select[mem>1000]"
+```
+
+This passes the filter expression directly to jhosts, which performs the node selection based on the specified criteria (e.g., memory, GPUs, CPU count, etc.).
+
+**Note**: The `-F` option is only applicable when using `jhosts` commands (job groups or all nodes). It does not apply to numeric job IDs because those jobs already have fixed node allocations.
 
 ### JH_HOSTS Parsing
 
@@ -482,6 +526,11 @@ For issues, questions, or contributions:
 
 ## Version History
 
+- **1.2** - Node filtering support
+  - Added `-F` option for jhosts selection expressions (e.g., `-F "select[mem>1000]"`)
+  - Changed jhosts command format from `jhosts attrib -w` to `jhosts -w`
+  - Support for filtering nodes by attributes (memory, GPUs, CPUs, etc.)
+  
 - **1.1** - Enhanced features
   - Automatic filtering of waiting jobs (EXEC_HOST = "-")
   - JH_HOSTS environment variable support for explicit host lists

@@ -57,6 +57,7 @@ static int jhinno_process_opt(opt_t *, int opt, char *arg);
 
 static List job_list = NULL;
 static int include_unknown = 0;  /* Include UNKNOWN status nodes when -j all */
+static char *filter_expression = NULL;  /* Filter expression for -F option */
 
 struct pdsh_module_operations jhinno_module_ops = {
     (ModInitF)       mod_jhinno_init,
@@ -72,6 +73,10 @@ struct pdsh_module_option jhinno_module_options[] = {
     { 'j', "jobid_or_group,...",
       "Run on nodes from jhinno job (number) or node group. "
       "Use special value 'all' to get all normal nodes.",
+      DSH | PCP, (optFunc) jhinno_process_opt
+    },
+    { 'F', "expression",
+      "Filter nodes using jhosts -R (e.g., -F \"select[mem>1000]\")",
       DSH | PCP, (optFunc) jhinno_process_opt
     },
     { 0, "jhinno-include-unknown",
@@ -111,6 +116,18 @@ static int jhinno_process_opt(opt_t *pdsh_opts, int opt, char *arg)
         if (arg == NULL)
             return 0;
         job_list = list_split_append(job_list, ",", arg);
+        break;
+    case 'F':  /* Filter expression for jhosts -R */
+        if (arg != NULL && arg[0] != '\0') {
+            if (filter_expression != NULL) {
+                free(filter_expression);
+            }
+            filter_expression = strdup(arg);
+            if (filter_expression == NULL) {
+                err("%p: jhinno: Failed to allocate memory for filter expression\n");
+                return -1;
+            }
+        }
         break;
     case 0:  /* --jhinno-include-unknown */
         include_unknown = 1;
@@ -288,15 +305,26 @@ static hostlist_t _jhinno_wcoll_from_group(const char *nodegroup)
     hostlist_t hl = NULL;
     int line_num = 0;
     int ret;
+    int cmd_len;
     
     if (nodegroup == NULL || nodegroup[0] == '\0') {
         err("%p: jhinno: nodegroup is NULL or empty\n");
         return NULL;
     }
     
-    ret = snprintf(cmd, sizeof(cmd), "jhosts attrib -w %s 2>/dev/null", nodegroup);
-    if (ret < 0 || (size_t)ret >= sizeof(cmd)) {
-        err("%p: jhinno: nodegroup too long\n");
+    /* Build command: jhosts -w [nodegroup] [-R "filter"] */
+    if (filter_expression != NULL) {
+        cmd_len = snprintf(cmd, sizeof(cmd), 
+                          "jhosts -w %s -R \"%s\" 2>/dev/null", 
+                          nodegroup, filter_expression);
+    } else {
+        cmd_len = snprintf(cmd, sizeof(cmd), 
+                          "jhosts -w %s 2>/dev/null", 
+                          nodegroup);
+    }
+    
+    if (cmd_len < 0 || (size_t)cmd_len >= sizeof(cmd)) {
+        err("%p: jhinno: command too long\n");
         return NULL;
     }
     
@@ -335,6 +363,9 @@ static hostlist_t _jhinno_wcoll_from_group(const char *nodegroup)
         
         if (*hostname == '\0')
             continue;
+        
+        /* For jhosts -w output, each line is just a hostname (no type field) */
+        /* No need to check for UNKNOWN or other types */
         
         if (hl == NULL) {
             hl = hostlist_create(hostname);
@@ -365,10 +396,10 @@ static hostlist_t _jhinno_wcoll_from_group(const char *nodegroup)
 }
 
 /*
- * Parse jhosts output for all nodes (jhosts attrib -w)
+ * Parse jhosts output for all nodes (jhosts -w)
  * Format: skip header line, then read data rows
- * Extract first column (hostname) and second column (type)
- * Skip nodes with type == UNKNOWN unless include_unknown is set
+ * Extract first column (hostname)
+ * Note: jhosts -w doesn't include type field; filtering is done via -R if specified
  */
 static hostlist_t _jhinno_wcoll_all(void)
 {
@@ -379,9 +410,22 @@ static hostlist_t _jhinno_wcoll_all(void)
     hostlist_t hl = NULL;
     int line_num = 0;
     int ret;
+    int cmd_len;
     
-    strncpy(cmd, "jhosts attrib -w 2>/dev/null", sizeof(cmd) - 1);
-    cmd[sizeof(cmd) - 1] = '\0';
+    /* Build command: jhosts -w [-R "filter"] */
+    if (filter_expression != NULL) {
+        cmd_len = snprintf(cmd, sizeof(cmd), 
+                          "jhosts -w -R \"%s\" 2>/dev/null", 
+                          filter_expression);
+    } else {
+        cmd_len = snprintf(cmd, sizeof(cmd), 
+                          "jhosts -w 2>/dev/null");
+    }
+    
+    if (cmd_len < 0 || (size_t)cmd_len >= sizeof(cmd)) {
+        err("%p: jhinno: command too long\n");
+        return NULL;
+    }
     
     fp = popen(cmd, "r");
     if (fp == NULL) {
@@ -419,21 +463,8 @@ static hostlist_t _jhinno_wcoll_all(void)
         if (*hostname == '\0')
             continue;
         
-        /* Extract type (second field) */
-        char *type = strtok(NULL, " \t");
-        if (type == NULL) {
-            /* No type field, assume UNKNOWN */
-            type = "";
-        }
-        
-        /* Skip whitespace in type */
-        while (*type == ' ' || *type == '\t')
-            type++;
-        
-        /* Skip UNKNOWN nodes unless include_unknown is set */
-        if (!include_unknown && strcmp(type, "UNKNOWN") == 0) {
-            continue;
-        }
+        /* For jhosts -w output, each line is just a hostname (no type field) */
+        /* No need to check for UNKNOWN; use -F option for filtering instead */
         
         if (hl == NULL) {
             hl = hostlist_create(hostname);
