@@ -1,543 +1,318 @@
-# JHINNO Module for pdsh
+PDSH JHINNO MODULE
+====================
 
-## Overview
+The pdsh-jhinno module provides pdsh support for targeting nodes managed by
+JHINNO (景行) job scheduler.
 
-The jhinno module integrates pdsh with the jhinno job scheduler, allowing you to execute commands on nodes managed by jhinno. This module supports querying nodes via two commands:
+The module uses jjobs and jhosts commands to retrieve node information and supports
+multiple methods for targeting nodes.
 
-- `jjobs` - Query node information by job ID (numeric job identifier), returns the execution nodes allocated to the job
-- `jhosts` - Query node and node group information, returns nodes belonging to a node group or all nodes in the cluster
+## FEATURES
 
-## Features
+- Target nodes by job ID (running jobs only)
+- Target nodes by node groups
+- Target all normal nodes with -j all
+- Use JOBS_JOBID or JH_HOSTS environment variables
+- **NEW: Full resource request string support with select, order, rusage, span segments**
+- NEW: Filter nodes with -F option
+- NEW: Conflict detection when using both -j resource string and -F option
+- NEW: Support for waiting jobs (automatically filtered out)
 
-- **Query by Job ID**: Get execution nodes allocated to a specific job using numeric job IDs (via jjobs)
-- **Query by Node Group**: Get nodes belonging to a specific node group using alphanumeric group identifiers (via jhosts)
-- **Query All Nodes**: Get all normal nodes in the cluster (special value: `all`)
-- **Node Filtering**: Filter nodes using jhosts selection expressions (via -F option)
-- **Filter Unknown Nodes**: Automatically skips nodes with `UNKNOWN` status by default
-- **Include Unknown Nodes**: Option to include unknown nodes in queries
-- **Filter Waiting Jobs**: Automatically skips jobs with no allocated nodes (EXEC_HOST = "-")
-- **Environment Variable Support**: Set `JOBS_JOBID` to specify default job ID or node group
-- **Explicit Host List Support**: Set `JH_HOSTS` to specify a custom node list with core counts
+## USAGE
 
-## Installation
+### Basic Usage by Job ID
 
-### Building with jhinno Support
-
-To build pdsh with jhinno module support:
-
-```bash
-./configure --with-jhinno
-make
-make install
-```
-
-### Requirements
-
-The jhinno module requires the following commands to be available in your PATH:
-
-- `jjobs` - Command to query job allocations
-- `jhosts` - Command to query node statuses
-
-## Usage
-
-### Basic Usage
-
-#### 1. Query by Numeric Job ID
-
-Get nodes allocated to a specific job:
+Target nodes used by a running job:
 
 ```bash
-pdsh -j 64882 hostname
+pdsh -j 12345 hostname
 ```
 
-This executes the `hostname` command on all nodes allocated to job ID 64882.
+This queries the jjobs command to get EXEC_HOST from the job.
 
-#### 2. Query by Node Group
+### Target by Node Groups
 
-Get nodes belonging to a specific node group:
+Use predefined node groups:
 
 ```bash
 pdsh -j c9A75 hostname
+pdsh -j compute,password hostname
 ```
 
-#### 3. Query All Normal Nodes
+Multiple groups can be specified with comma:
 
-Get all nodes with normal status (filters out UNKNOWN nodes):
+```bash
+pdsh -j group1,group2,group3 hostname
+```
+
+### Target All Normal Nodes
+
+Use special value "all" to get all nodes in normal status:
 
 ```bash
 pdsh -j all hostname
 ```
 
-#### 4. Include Unknown Nodes
+### Filter Nodes with -F Option (v1.2+)
 
-Include nodes with UNKNOWN status in the query:
+Use -F option to filter nodes using resource request expressions:
+
+```bash
+# Filter by memory
+pdsh -j all -F "select[mem>1000]" hostname
+
+# Filter by GPUs
+pdsh -j all -F "select[gpus>0]" "nvidia-smi"
+
+# Filter by CPUs
+pdsh -j all -F "select[cpus>=64]" hostname
+
+# Combine multiple filters
+pdsh -j c9A75 -F "select[mem>1000 && gpus>0]" hostname
+```
+
+The -F option passes the expression directly to jhosts -R for node filtering.
+
+Syntax of filter expressions:
+
+```
+-F "select[expression]"
+```
+
+Supported operators: >, <, >=, <=, ==, !=, &&, ||
+
+Examples:
+- `select[mem>1000]` - memory > 1000MB
+- `select[gpus>0]` - nodes with at least 1 GPU
+- `select[cpus>=64]` - nodes with >= 64 CPUs
+- `select[mem>1000 && gpus>0]` - memory > 1000MB AND has GPUs
+- `select[mem<5000 || gpus>2]` - memory < 5000MB OR has >2 GPUs
+
+### Resource Request Strings (Enhanced - v1.3+)
+
+The -j option now supports complete resource request strings with four segments:
+
+**Syntax:**
+```
+-j "select[selection_string] order[order_string] rusage[usage_string] span[span_string]"
+```
+
+**Segments:**
+- **select**: Criteria for selecting nodes
+- **order**: How to sort nodes (uses jhosts stat)
+- **rusage**: Expected resource consumption
+- **span**: Whether parallel job can span multiple nodes
+
+**Examples:**
+
+1. **Select only:**
+   ```bash
+   pdsh -j "select[mem>1000]" hostname
+   ```
+
+2. **Select + Order:**
+   ```bash
+   pdsh -j "select[mem>1000] order[rusage:mem]" hostname
+   ```
+
+3. **Select + Rusage:**
+   ```bash
+   pdsh -j "select[gpus>0] rusage[gpu=1]" "nvidia-smi"
+   ```
+
+4. **Complete (four segments):**
+   ```bash
+   pdsh -j "select[mem>1000 && gpus>=2] order[rusage:mem] rusage[gpu=2:mem=16G] span[ptile=1]" hostname
+   ```
+
+5. **Order only:**
+   ```bash
+   pdsh -j "order[rusage:mem]" hostname
+   ```
+
+6. **Rusage only:**
+   ```bash
+   pdsh -j "rusage[gpu=1]" hostname
+   ```
+
+**Backward Compatibility:**
+```bash
+# Old style still works
+pdsh -j all -F "select[mem>1000]" hostname
+pdsh -j c9A75 -F "select[cpus>=64]" hostname
+
+# New simplified style
+pdsh -j "select[mem>1000]" hostname
+```
+
+**Filter Expressions:**
+- Memory: `select[mem>1000]`, `select[mem<1000]`, `select[mem>=1000 && mem<=5000]`
+- GPUs: `select[gpus>0]`, `select[gpus>=2]`
+- CPUs: `select[cpus>=64]`
+- Multiple: `select[mem>1000 && gpus>0]`
+
+**Conflict Detection:**
+Cannot use both resource string and -F option:
+```bash
+# Error
+pdsh -j "select[mem>1000]" -F "select[gpus>0]" hostname
+```
+
+This will produce the error:
+```
+pdsh@host: jhinno: Cannot specify resource request string with both -j and -F options
+pdsh@host: jhinno: Use either '-j "expression"' OR '-j group -F "expression"', not both
+```
+
+**Combine with node groups:**
+```bash
+# Nodes from group c9A75 + filter
+pdsh -j "c9A75,select[mem>1000]" hostname
+```
+
+### Environment Variables
+
+#### JOBS_JOBID
+
+Set default job ID or group:
+
+```bash
+export JOBS_JOBID=12345
+pdsh hostname  # automatically uses job 12345
+
+export JOBS_JOBID=all
+pdsh hostname  # uses all normal nodes
+
+export JOBS_JOBID="select[gpus>0] rusage[gpu=1]"
+pdsh "nvidia-smi"  # uses resource request string
+```
+
+#### JH_HOSTS
+
+Set explicit host/core counts:
+
+```bash
+export JH_HOSTS="node1 128 node2 256 node3 64"
+pdsh hostname  # uses these hosts
+```
+
+Format: "hostname1 corecount hostname2 corecount ..."
+
+### Waiting Job Handling (NEW)
+
+When targeting a waiting job (i.e., job without assigned execution nodes), or when
+the resource filter results in no matching nodes, pdsh returns by default
+
+```
+"no remote hosts specified"
+```
+
+and exits without executing the command.
+
+To check the EXEC_HOST for a job:
+
+```bash
+jjobs -o exec_host:4096 12345
+EXEC_HOST
+-
+```
+
+If the second line is "-", the job is waiting for resource assignment.
+
+If a job is in waiting state and you run:
+
+```bash
+pdsh -j 12345 hostname
+```
+
+You will see:
+
+```
+pdsh@host: no remote hosts specified
+```
+
+This is expected - pdsh identifies that no nodes are allocated to this job.
+
+### MODULE OPTIONS
+
+--jhinno-include-unknown
+
+By default, when using -j all, UNKNOWN status nodes are excluded. Use this option
+to include them:
 
 ```bash
 pdsh -j all --jhinno-include-unknown hostname
 ```
 
-#### 5. Using Environment Variable
-
-Set the `JOBS_JOBID` environment variable to specify a default job ID:
+### EXAMPLES
 
 ```bash
-export JOBS_JOBID=64882
-pdsh hostname
+# Run on nodes of job 12345
+pdsh -j 12345 command
+
+# Run on nodes in group c9A75
+pdsh -j c9A75 command
+
+# Run on all normal nodes
+pdsh -j all command
+
+# Run on nodes with memory > 1000MB
+pdsh -j "select[mem>1000]" command
+
+# Run on nodes with GPUs
+pdsh -j "select[gpus>0]" "nvidia-smi"
+
+# Run on nodes with >= 64 CPUs and memory > 1000MB
+pdsh -j "select[cpus>=64 && mem>1000]" command
+
+# Use environment variable
+export JOBS_JOBID=all
+pdsh command
+
+# Use JH_HOSTS for explicit host list
+export JH_HOSTS="node1 128 node2 256"
+pdsh command
+
+# Combine node groups + filter
+pdsh -j "c9A75,select[mem>1000]" command
+
+# Complete resource request with all four segments
+pdsh -j "select[mem>1000] order[rusage:mem] rusage[gpu=2] span[ptile=1]" command
 ```
 
-#### 6. Using JH_HOSTS Environment Variable
-
-Set the `JH_HOSTS` environment variable to specify a custom node list. The format is "hostname corecount hostname corecount...":
-
-```bash
-export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
-pdsh hostname
-```
-
-This is useful when you want to manually specify nodes and their CPU counts without querying the job scheduler. The core count values are informational only - the module extracts the hostnames and ignores the CPU counts.
-
-#### 7. Node Filtering with Selection Expressions
-
-Filter nodes using jhosts selection expressions via the `-F` option. This allows you to select nodes based on their attributes:
-
-```bash
-# Filter nodes by memory (greater than 1000MB)
-pdsh -j all -F "select[mem>1000]" hostname
-
-# Filter nodes with GPUs
-pdsh -j all -F "select[gpus>0]" "nvidia-smi"
-
-# Filter nodes with multiple conditions
-pdsh -j all -F "select[gpus>=2 && mem>2000]" "nvidia-smi"
-
-# Filter nodes for a specific group
-pdsh -j c9A75 -F "select[cpus>=64]" hostname
-```
-
-The `-F` option passes the expression directly to `jhosts -R`, enabling powerful node selection based on resources, hardware attributes, or custom properties defined in your jhinno cluster.
-
-**Note**: The `-F` option works with:
-- `-j all` (all nodes)
-- `-j <nodegroup>` (specific node groups)
-- `-j all --jhinno-include-unknown` (include unknown nodes with filter)
-
-It does NOT apply to numeric job IDs (e.g., `-j 64882`) because those jobs already have fixed allocations.
-
-### Advanced Usage
-
-#### Multiple Jobs
-
-Query multiple jobs or job groups:
-
-```bash
-pdsh -j 64882,64883,64884 hostname
-```
-
-Or mix job IDs and node groups:
-
-```bash
-pdsh -j 64882,c9A75,c9A76 hostname
-```
-
-**Important**: When querying multiple jobs or mixing jjobs and jhosts sources, the module automatically handles duplicate nodes. For example, if a node appears in both a job ID query and a node group query, it will only be executed once. The final node list is deduplicated after merging all sources.
-
-#### Command Execution
-
-Execute commands on nodes:
-
-```bash
-# Check system load
-pdsh -j all "uptime"
-
-# Run multiple commands
-pdsh -j all "df -h && free -m"
-
-# Check disk space
-pdsh -j all "du -sh /var/log"
-
-# List running processes
-pdsh -j all "ps aux | grep myapp"
-```
-
-#### Quiet Mode
-
-Suppress the hostname prefix on output:
-
-```bash
-pdsh -j all -q "hostname"
-```
-
-#### Limited Output
-
-Check if nodes are responsive:
-
-```bash
-pdsh -j all -n
-```
-
-## Node Status Filtering
-
-The jhinno module automatically filters out nodes with `UNKNOWN` status when using `-j all` or job group queries. This is the default behavior.
-
-### Example of Unknown Nodes
-
-Nodes with status like this are filtered by default:
-
-```
-hpc-gpu-node06 UNKNOWN  UNKNOWN      -        -        -       -     -       -     - -
-```
-
-### Filtering Options
-
-1. **Default**: Filter out UNKNOWN nodes
-   ```bash
-   pdsh -j all hostname
-   ```
-
-2. **Include Unknown**: Include all nodes regardless of status
-   ```bash
-   pdsh -j all --jhinno-include-unknown hostname
-   ```
-
-## Waiting Job Handling
-
-When a job is in waiting status (not yet allocated to any nodes), the `jjobs` command returns:
-
-```
-EXEC_HOST
--
-```
-
-The jhinno module automatically detects and filters such jobs - if a job has no allocated nodes (EXEC_HOST = "-"), it will result in an empty node list, and pdsh will report "no remote hosts specified". This prevents attempts to execute commands on non-existent nodes.
-
-### Example
-
-```bash
-# Query a waiting job (no allocated nodes)
-pdsh -j 62568 hostname
-# Output: pdsh@host: no remote hosts specified
-
-# Query a running job (with allocated nodes)
-pdsh -j 64882 hostname
-# Output: executes on all allocated nodes
-```
-
-## Environment Variables
-
-The jhinno module supports two environment variables:
-
-### JOBS_JOBID
-
-Specifies a default job ID or node group. This is used when no `-j` option is provided on the command line.
-
-```bash
-export JOBS_JOBID=64882
-pdsh hostname  # Equivalent to: pdsh -j 64882 hostname
-```
-
-### JH_HOSTS
-
-Specifies a custom host list with core counts. This is used when you want to provide node information directly without querying the job scheduler.
-
-**Format**: "hostname1 corecount hostname2 corecount hostname3 corecount..."
-**Example**: "ev-hpc-test01 128 ev-hpc-test02 128"
-
-```bash
-export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
-pdsh hostname  # Executes on ev-hpc-test01 and ev-hpc-test02
-```
-
-**Priority**: 
-1. `-j` command-line option (highest priority)
-2. `JOBS_JOBID` environment variable (medium priority)
-3. `JH_HOSTS` environment variable (lowest priority)
-
-If `-j` is specified on the command line, it overrides both environment variables. If `-j` is not specified, the module first checks `JH_HOSTS`, then `JOBS_JOBID`.
-
-## Module Conflicts
-
-The jhinno module conflicts with the following modules because they use the same `-j` option:
-
-- `slurm` module
-- `torque` module
-
-**Important**: Do not enable jhinno, slurm, and torque modules simultaneously.
-
-## Internals
-
-### Job ID Detection
-
-The module automatically detects the type of job identifier:
-
-- **Numeric** (e.g., `64882`) → Uses `jjobs` command
-- **Alphanumeric** (e.g., `c9A75`) → Uses `jhosts` command
-- **Special value `all`** → Uses `jhosts` command to get all nodes
-
-### Command Execution
-
-For numeric job IDs, the module executes:
-```bash
-jjobs -o exec_host:4096 <jobid>
-```
-
-Output format:
-```
-EXEC_HOST
-64*ev-hpc-compute098:64*ev-hpc-compute164:64*ev-hpc-compute171
-```
-
-The module extracts node names from this format, ignoring the numeric prefix (CPU count). If the EXEC_HOST is "-" (waiting job), no nodes are returned.
-
-For job groups or all nodes, the module executes:
-```bash
-jhosts -w <jobgroup>
-```
-
-Output format:
-```
-HOST_NAME
-ev-hpc-test02
-ev-hpc-test03
-ev-hpc-test04
-```
-
-The module extracts the hostname from each line. The `jhosts -w` command returns only hostnames, not detailed attributes.
-
-When using the `-F` option for filtering, the module executes:
-```bash
-jhosts -w [nodegroup] -R "<filter_expression>"
-```
-
-For example, with `-F "select[mem>1000]"`, the command becomes:
-```bash
-jhosts -w -R "select[mem>1000]"
-```
-
-This passes the filter expression directly to jhosts, which performs the node selection based on the specified criteria (e.g., memory, GPUs, CPU count, etc.).
-
-**Note**: The `-F` option is only applicable when using `jhosts` commands (job groups or all nodes). It does not apply to numeric job IDs because those jobs already have fixed node allocations.
-
-### JH_HOSTS Parsing
-
-When `JH_HOSTS` is set, the module parses the string in the format "hostname corecount hostname corecount...":
-
-```c
-JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
-```
-
-The module extracts hostnames from odd positions (1st, 3rd, 5th, ...) and ignores core counts from even positions (2nd, 4th, 6th, ...).
-
-## Troubleshooting
-
-### Module Not Found
-
-If you get an error about the jhinno module not being found:
-
-```bash
-# Check if module is loaded
-pdsh -L | grep jhinno
-
-# Rebuild with jhinno support
-./configure --with-jhinno
-make
-make install
-```
-
-### Commands Not Found
-
-If you get errors about `jjobs` or `jhosts` commands not found:
-
-1. Ensure jhinno job scheduler is installed
-2. Verify the commands are in your PATH:
-   ```bash
-   which jjobs jhosts
-   ```
-3. Configure the module with the correct paths
-
-### No Nodes Found
-
-If pdsh reports no nodes found:
-
-1. **For job queries**: Verify the job ID is valid and check if the job is waiting:
-   ```bash
-   jjobs -o exec_host:4096 <jobid>
-   # If output is "-", the job is waiting and has no allocated nodes
-   ```
-
-2. **For job group queries**: Check if nodes are in UNKNOWN status:
-   ```bash
-   jhosts attrib -w | grep UNKNOWN
-   ```
-
-3. **Try including unknown nodes**:
-   ```bash
-   pdsh -j all --jhinno-include-unknown -n
-   ```
-
-4. **Check if a job is waiting**:
-   ```bash
-   pdsh -j <jobid> hostname
-   # If output is "no remote hosts specified", the job may be waiting
-   ```
-
-### Permission Denied
-
-If you get permission denied errors:
-
-1. Check your authentication method (rsh, ssh, etc.)
-2. Ensure you have proper permissions on the target nodes
-3. Verify SSH keys are properly configured if using SSH
-
-### Explicit Host List Not Working
-
-If `JH_HOSTS` doesn't work:
-
-1. Verify the format is correct: "hostname corecount hostname corecount..."
-   ```bash
-   # Correct
-   export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
-   
-   # Incorrect (missing core count)
-   export JH_HOSTS="ev-hpc-test01 ev-hpc-test02"
-   ```
-
-2. Make sure hostnames are separated by spaces
-3. If using `-j` option, it will override `JH_HOSTS`
-
-## Examples
-
-### Example 1: Check System Information
-
-```bash
-# Get uname from all nodes
-pdsh -j all "uname -a"
-
-# Check kernel version
-pdsh -j all "uname -r"
-
-# Check distribution
-pdsh -j all "cat /etc/os-release | grep PRETTY_NAME"
-```
-
-### Example 2: System Maintenance
-
-```bash
-# Check disk space on all nodes
-pdsh -j all "df -h"
-
-# Check memory usage
-pdsh -j all "free -h"
-
-# Check running services
-pdsh -j all "systemctl list-units --type=service --state=running"
-
-# Check system logs
-pdsh -j all "tail -20 /var/log/syslog"
-```
-
-### Example 3: Application Deployment
-
-```bash
-# Copy file to job nodes
-pdcp -j 64882 /local/myapp /opt/
-
-# Install package
-pdsh -j 64882 "yum install -y myapp"
-
-# Restart service
-pdsh -j 64882 "systemctl restart myapp"
-```
-
-### Example 4: Monitoring
-
-```bash
-# Check CPU load
-pdsh -j all "uptime"
-
-# Check network connections
-pdsh -j all "netstat -an | grep ESTABLISHED | wc -l"
-
-# Check process count
-pdsh -j all "ps aux | wc -l"
-```
-
-### Example 5: Using JH_HOSTS for Custom Node Lists
-
-```bash
-# Execute on specific nodes without querying job scheduler
-export JH_HOSTS="node1 64 node2 64 node3 128"
-pdsh "uptime"
-
-# Useful for testing or when job scheduler is unavailable
-export JH_HOSTS="test-node01 32 test-node02 32"
-pdsh "hostname"
-```
-
-### Example 6: Waiting Job Detection
-
-```bash
-# Test a job that is waiting
-pdsh -j 62568 hostname
-# If output: "pdsh@host: no remote hosts specified"
-# The job 62568 is waiting and has no allocated nodes
-
-# Check job status directly
-jjobs -o exec_host:4096 62568
-# Output:
-# EXEC_HOST
-# -
-```
-
-## Performance Considerations
-
-- The module executes external commands (`jjobs` or `jhosts`) for each query
-- For large clusters, consider caching results or limiting the number of nodes
-- Adjust the fanout (`-f` option) based on your network capacity:
-  ```bash
-  pdsh -j all -f 64 "hostname"
-  ```
-
-## Security Considerations
-
-- Ensure proper authentication is configured (SSH keys, rhosts, etc.)
-- Be cautious when running commands with elevated privileges
-- Review the output before executing commands on production systems
-- Test on a subset of nodes before running on the entire cluster
-
-## Contributing
-
-To contribute improvements to the jhinno module:
-
-1. Fork the pdsh repository
-2. Make your changes
-3. Test thoroughly
-4. Submit a pull request
-
-## License
-
-The jhinno module is part of pdsh and is licensed under the GNU General Public License (GPL).
-
-## Support
-
-For issues, questions, or contributions:
-
-- GitHub: https://github.com/chaos/pdsh
-- Mailing List: pdsh-users@lists.sourceforge.net
-
-## Version History
+## VERSION HISTORY
+
+- **1.3** - Enhanced -j option with full resource request string support
+  - Support for complete resource request strings: select, order, rusage, span
+  - Simplified usage: pdsh -j "select[mem>1000]"
+  - Combine multiple segments: select, order, rusage, span
+  - Conflict detection when using both -j resource string and -F option
+  - Backward compatible with -j all -F "expression" style
 
 - **1.2** - Node filtering support
-  - Added `-F` option for jhosts selection expressions (e.g., `-F "select[mem>1000]"`)
-  - Changed jhosts command format from `jhosts attrib -w` to `jhosts -w`
-  - Support for filtering nodes by attributes (memory, GPUs, CPUs, etc.)
-  
-- **1.1** - Enhanced features
-  - Automatic filtering of waiting jobs (EXEC_HOST = "-")
-  - JH_HOSTS environment variable support for explicit host lists
-  - Improved error handling for jobs with no allocated nodes
-  
-- **1.0** - Initial release
-  - Support for jjobs and jhosts commands
-  - Job ID and job group queries
-  - Automatic UNKNOWN node filtering
-  - Environment variable support (JOBS_JOBID)
+  - Added -F option for node filtering
+  - Changed jhosts command from "attrib -w" to "-w"
+  - Added automatic filtering of waiting jobs
+  - Enhanced whitespace handling in jhosts output
+
+- **1.1** - Basic implementation
+  - Support for -j job ID and node groups
+  - Support for -j all
+  - JOBS_JOBID and JH_HOSTS environment variables
+  --jhinno-include-unknown option
+
+## REQUIREMENTS
+
+- pdsh (built with module support)
+- jjobs command (for job ID lookups)
+- jhosts command (for node group and filtering)
+- Access to JHINNO (景行) job scheduler
+
+## FILES
+
+- src/modules/jhinno.c - Module source code
+- README.jhinno - This file
+
+## SEE ALSO
+
+pdsh(1), jjobs(1), jhosts(1), JHINNO documentation

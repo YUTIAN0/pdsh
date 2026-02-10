@@ -1,532 +1,314 @@
-# jhinno 模块 for pdsh
+# PDSH JHINNO 模块
 
-## 概述
+pdsh-jhinno 模块为 pdsh 提供了支持，用于连接由 JHINNO（景行）作业调度系统管理的节点。
 
-jhinno 模块将 pdsh 与 jhinno 作业调度器集成，允许您在由 jhinno 管理的节点上执行命令。该模块通过两种命令支持查询节点：
-
-- `jjobs` - 通过作业ID查询节点信息（数字作业标识符），返回作业分配的执行节点
-- `jhosts` - 查询节点和节点组信息，返回属于节点组的节点或集群中的所有节点
+该模块使用 jjobs 和 jhosts 命令获取节点信息，并支持多种节点选择方法。
 
 ## 功能特性
 
-- **按作业ID查询**：使用数字作业ID获取分配给特定作业的执行节点（通过jjobs）
-- **按节点组查询**：使用字母数字组标识符获取属于特定节点组的节点（通过jhosts）
-- **查询所有节点**：获取集群中所有正常节点（特殊值：`all`）
-- **节点筛选**：使用jhosts选择表达式筛选节点（通过 -F 选项）
-- **过滤UNKNOWN节点**：默认自动跳过状态为 `UNKNOWN` 的节点
-- **包含UNKNOWN节点**：选项可包含状态为UNKNOWN的节点
-- **过滤等待作业**：自动跳过没有分配节点的作业（EXEC_HOST = "-"）
-- **环境变量支持**：设置 `JOBS_JOBID` 来指定默认作业ID或节点组
-- **显式主机列表支持**：设置 `JH_HOSTS` 来指定带有核数的自定义节点列表
-
-## 安装
-
-### 使用 jhinno 支持构建
-
-要构建带有 jhinno 模块支持的 pdsh：
-
-```bash
-./configure --with-jhinno
-make
-make install
-```
-
-### 要求
-
-jhinno 模块需要以下命令在您的 PATH中可用：
-
-- `jjobs` - 用于查询作业分配的命令
-- `jhosts` - 用于查询节点状态的命令
+- 通过作业ID指定节点（仅限运行中的作业）
+- 通过节点组指定节点
+- 使用 -j all 指定所有正常节点
+- 支持 JOBS_JOBID 或 JH_HOSTS 环境变量
+- **新增：完整资源请求串支持，包含 select、order、rusage、span 四个段**
+- 新增：-F 选项节点筛选功能
+- 新增：当同时使用 -j 资源串和 -F 选项时的冲突检测
+- 新增：等待作业自动过滤功能
 
 ## 使用方法
 
-### 基础用法
+### 按作业ID使用（基本用法）
 
-#### 1. 按数字作业ID查询
-
-获取分配给特定作业的节点：
+指定运行中作业使用的节点：
 
 ```bash
-pdsh -j 64882 hostname
+pdsh -j 12345 hostname
 ```
 
-这将在作业ID 64882 分配的所有节点上执行 `hostname` 命令。
+这会查询 jjobs 命令获取作业的 EXEC_HOST。
 
-#### 2. 按节点组查询
+### 按节点组使用
 
-获取属于特定节点组的节点：
+使用预定义的节点组：
 
 ```bash
 pdsh -j c9A75 hostname
+pdsh -j compute,password hostname
 ```
 
-#### 3. 查询所有正常节点
+可以用逗号指定多个组：
 
-获取所有状态为正常的节点（过滤掉UNKNOWN节点）：
+```bash
+pdsh -j group1,group2,group3 hostname
+```
+
+### 指定所有正常节点
+
+使用特殊值 "all" 获取所有处于正常状态的节点：
 
 ```bash
 pdsh -j all hostname
 ```
 
-#### 4. 包含UNKNOWN节点
+### 使用 -F 选项筛选节点（v1.2+）
 
-在查询中包含状态为UNKNOWN的节点：
+使用 -F 选项通过资源请求表达式筛选节点：
+
+```bash
+# 按内存筛选
+pdsh -j all -F "select[mem>1000]" hostname
+
+# 按GPU筛选
+pdsh -j all -F "select[gpus>0]" "nvidia-smi"
+
+# 按CPU筛选
+pdsh -j all -F "select[cpus>=64]" hostname
+
+# 组合多个筛选条件
+pdsh -j c9A75 -F "select[mem>1000 && gpus>0]" hostname
+```
+
+-F 选项将表达式直接传递给 jhosts -R 进行节点筛选。
+
+筛选表达式语法：
+
+```
+-F "select[表达式]"
+```
+
+支持的运算符：>、<、>=、<=、==、!=、&&、||
+
+示例：
+- `select[mem>1000]` - 内存 > 1000MB
+- `select[gpus>0]` - 至少有 1 个 GPU 的节点
+- `select[cpus>=64]` - CPU 数 >= 64 的节点
+- `select[mem>1000 && gpus>0]` - 内存 > 1000MB 且有 GPU
+- `select[mem<5000 || gpus>2]` - 内存 < 5000MB 或有 >2 个 GPU
+
+### 资源请求串（增强功能 - v1.3+）
+
+-j 选项现在支持完整的资源请求串，包含四个段：
+
+**语法：**
+```
+-j "select[选择字符串] order[排序字符串] rusage[资源使用字符串] span[跨越字符串]"
+```
+
+**四个段：**
+- **select**：选择节点的标准
+- **order**：如何对满足条件的节点排序
+- **rusage**：期望的资源消耗
+- **span**：并行批处理作业是否可跨越多个节点
+
+**示例：**
+
+1. **仅使用 select：**
+   ```bash
+   pdsh -j "select[mem>1000]" hostname
+   ```
+
+2. **select + order 组合：**
+   ```bash
+   pdsh -j "select[mem>1000] order[rusage:mem]" hostname
+   ```
+
+3. **select + rusage 组合：**
+   ```bash
+   pdsh -j "select[gpus>0] rusage[gpu=1]" "nvidia-smi"
+   ```
+
+4. **完整使用四个段：**
+   ```bash
+   pdsh -j "select[mem>1000 && gpus>=2] order[rusage:mem] rusage[gpu=2:mem=16G] span[ptile=1]" hostname
+   ```
+
+5. **仅使用 order：**
+   ```bash
+   pdsh -j "order[rusage:mem]" hostname
+   ```
+
+6. **仅使用 rusage：**
+   ```bash
+   pdsh -j "rusage[gpu=1]" hostname
+   ```
+
+**向后兼容性：**
+```bash
+# 旧方式仍然有效
+pdsh -j all -F "select[mem>1000]" hostname
+pdsh -j c9A75 -F "select[cpus>=64]" hostname
+
+# 新简化方式
+pdsh -j "select[mem>1000]" hostname
+```
+
+**筛选表达式：**
+- 内存：`select[mem>1000]`、`select[mem<1000]`、`select[mem>=1000 && mem<=5000]`
+- GPU：`select[gpus>0]`、`select[gpus>=2]`
+- CPU：`select[cpus>=64]`
+- 多条件：`select[mem>1000 && gpus>0]`
+
+**冲突检测：**
+不能同时使用资源串和 -F 选项：
+```bash
+# 错误
+pdsh -j "select[mem>1000]" -F "select[gpus>0]" hostname
+```
+
+这将产生错误：
+```
+pdsh@host: jhinno: Cannot specify resource request string with both -j and -F options
+pdsh@host: jhinno: Use either '-j "expression"' OR '-j group -F "expression"', not both
+```
+
+**与节点组结合使用：**
+```bash
+# 来自 c9A75 组的节点 + 筛选
+pdsh -j "c9A75,select[mem>1000]" hostname
+```
+
+### 环境变量
+
+#### JOBS_JOBID
+
+设置默认的作业ID或节点组：
+
+```bash
+export JOBS_JOBID=12345
+pdsh hostname  # 自动使用作业 12345
+
+export JOBS_JOBID=all
+pdsh hostname  # 使用所有正常节点
+
+export JOBS_JOBID="select[gpus>0] rusage[gpu=1]"
+pdsh "nvidia-smi"  # 使用资源请求串
+```
+
+#### JH_HOSTS
+
+设置显式的主机/核心数：
+
+```bash
+export JH_HOSTS="node1 128 node2 256 node3 64"
+pdsh hostname  # 使用这些主机
+```
+
+格式："主机名1 核心数 主机名2 核心数 ..."
+
+### 等待作业处理（新增功能）
+
+当目标是一个等待作业（即没有分配执行节点的作业），或者资源筛选结果没有匹配的节点时，
+pdsh 默认返回：
+
+```
+"no remote hosts specified"
+```
+
+然后退出，不执行命令。
+
+检查作业的 EXEC_HOST：
+
+```bash
+jjobs -o exec_host:4096 12345
+EXEC_HOST
+-
+```
+
+如果第二行是 "-"，则该作业正在等待资源分配。
+
+如果作业处于等待状态，并且运行：
+
+```bash
+pdsh -j 12345 hostname
+```
+
+将会看到：
+
+```
+pdsh@host: no remote hosts specified
+```
+
+这是预期的 - pdsh 识别出没有为该作业分配节点。
+
+### 模块选项
+
+--jhinno-include-unknown
+
+默认情况下，使用 -j all 时会排除 UNKNOWN 状态的节点。使用此选项可以包含它们：
 
 ```bash
 pdsh -j all --jhinno-include-unknown hostname
 ```
 
-#### 5. 使用环境变量
-
-设置 `JOBS_JOBID` 环境变量来指定默认作业ID：
-
-```bash
-export JOBS_JOBID=64882
-pdsh hostname
-```
-
-#### 7. 使用选择表达式进行节点筛选
-
-使用 `-F` 选项通过 jhosts 选择表达式筛选节点。这允许您根据节点属性选择节点：
-
-```bash
-# 按内存筛选节点（大于1000MB）
-pdsh -j all -F "select[mem>1000]" hostname
-
-# 筛选有GPU的节点
-pdsh -j all -F "select[gpus>0]" "nvidia-smi"
-
-# 使用多个条件筛选节点
-pdsh -j all -F "select[gpus>=2 && mem>2000]" "nvidia-smi"
-
-# 为特定组筛选节点
-pdsh -j c9A75 -F "select[cpus>=64]" hostname
-```
-
-`-F` 选项将表达式直接传递给 `jhosts -R`，支持基于资源、硬件属性或在您的 jhinno 集群中定义的自定义属性的强大节点选择。
-
-**注意**：`-F` 选项适用于：
-- `-j all`（所有节点）
-- `-j <nodegroup>`（特定节点组）
-- `-j all --jhinno-include-unknown`（包含带筛选的UNKNOWN节点）
-
-它**不**适用于数字作业ID（例如 `-j 64882`），因为这些作业已有固定分配。
-
-### 高级用法
-
-#### 多个查询
-
-查询多个作业或节点组：
-
-```bash
-pdsh -j 64882,64883,64884 hostname
-```
-
-或混合作业ID和节点组：
-
-```bash
-pdsh -j 64882,c9A75,c9A76 hostname
-```
-
-**重要**：当查询多个作业或混合使用jjobs和jhosts来源时，模块会自动处理重复的节点。例如，如果一个节点同时出现在作业ID查询和节点组查询中，它只会被执行一次。最终节点列表在合并所有来源后会进行去重。
-
-#### 命令执行
-
-在节点上执行命令：
-
-```bash
-# 检查系统负载
-pdsh -j all "uptime"
-
-# 运行多个命令
-pdsh -j all "df -h && free -m"
-
-# 检查磁盘空间
-pdsh -j all "du -sh /var/log"
-
-# 列出正在运行的进程
-pdsh -j all "ps aux | grep myapp"
-```
-
-#### 静默模式
-
-抑制输出中的主机名前缀：
-
-```bash
-pdsh -j all -q "hostname"
-```
-
-#### 限制输出
-
-检查节点是否响应：
-
-```bash
-pdsh -j all -n
-```
-
-## 节点状态过滤
-
-在使用 `-j all` 或节点组查询时，jhinno 模块会自动过滤掉状态为 `UNKNOWN` 的节点。这是默认行为。
-
-### UNKNOWN节点示例
-
-默认情况下会过滤掉状态如下的节点：
-
-```
-hpc-gpu-node06 UNKNOWN  UNKNOWN      -        -        -       -     -       -     - -
-```
-
-### 过滤选项
-
-1. **默认**：过滤掉UNKNOWN节点
-   ```bash
-   pdsh -j all hostname
-   ```
-
-2. **包含UNKNOWN**：包含所有节点，不管状态如何
-   ```bash
-   pdsh -j all --jhinno-include-unknown hostname
-   ```
-
-## 等待作业处理
-
-当作业处于等待状态（尚未分配给任何节点）时，`jjobs` 命令返回：
-
-```
-EXEC_HOST
--
-```
-
-jhinno 模块自动检测并过滤此类作业 - 如果作业没有分配节点（EXEC_HOST = "-"），它将导致空节点列表，pdsh 将报告"未指定远程主机"。这防止尝试在不存在的节点上执行命令。
-
 ### 示例
 
 ```bash
-# 查询等待作业（没有分配节点）
-pdsh -j 62568 hostname
-# 输出: pdsh@host: no remote hosts specified
+# 在作业 12345 的节点上运行
+pdsh -j 12345 command
 
-# 查询运行作业（有分配节点）
-pdsh -j 64882 hostname
-# 输出: 在所有分配节点上执行
+# 在 c9A75 组的节点上运行
+pdsh -j c9A75 command
+
+# 在所有正常节点上运行
+pdsh -j all command
+
+# 在内存 > 1000MB 的节点上运行
+pdsh -j "select[mem>1000]" command
+
+# 在有 GPU 的节点上运行
+pdsh -j "select[gpus>0]" "nvidia-smi"
+
+# 在 CPU >= 64 且内存 > 1000MB 的节点上运行
+pdsh -j "select[cpus>=64 && mem>1000]" command
+
+# 使用环境变量
+export JOBS_JOBID=all
+pdsh command
+
+# 使用 JH_HOSTS 指定显式主机列表
+export JH_HOSTS="node1 128 node2 256"
+pdsh command
+
+# 组合节点组 + 筛选
+pdsh -j "c9A75,select[mem>1000]" command
+
+# 使用所有四个段的完整资源请求
+pdsh -j "select[mem>1000] order[rusage:mem] rusage[gpu=2] span[ptile=1]" command
 ```
-
-## 环境变量
-
-jhinno 模块支持两个环境变量：
-
-### JOBS_JOBID
-
-指定默认作业ID或节点组。当命令行上没有提供 `-j` 选项时使用。
-
-```bash
-export JOBS_JOBID=64882
-pdsh hostname  # 等同于: pdsh -j 64882 hostname
-```
-
-### JH_HOSTS
-
-指定带有核数的自定义主机列表。当您想直接提供节点信息而不查询作业调度器时使用。
-
-**格式**: "主机名1 核数 主机名2 核数 主机名3 核数..."
-**示例**: "ev-hpc-test01 128 ev-hpc-test02 128"
-
-```bash
-export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
-pdsh hostname  # 在 ev-hpc-test01 和 ev-hpc-test02 上执行
-```
-
-**优先级**: 
-1. `-j` 命令行选项（最高优先级）
-2. `JOBS_JOBID` 环境变量（中等优先级）
-3. `JH_HOSTS` 环境变量（最低优先级）
-
-如果在命令行上指定 `-j`，它将覆盖两个环境变量。如果未指定 `-j`，模块首先检查 `JH_HOSTS`，然后检查 `JOBS_JOBID`。
-
-## 模块冲突
-
-jhinno 模块与以下模块冲突，因为它们使用相同的 `-j` 选项：
-
-- `slurm` 模块
-- `torque` 模块
-
-**重要**：不要同时启用jhinno、slurm和torque模块。
-
-## 内部实现
-
-### 作业ID检测
-
-模块自动检测作业标识符的类型：
-
-- **数字**（如 `64882`）→ 使用 `jjobs` 命令
-- **字母数字**（如 `c9A75`）→ 使用 `jhosts` 命令
-- **特殊值 `all`** → 使用 `jhosts` 命令获取所有节点
-
-### 命令执行
-
-对于数字作业ID，模块执行：
-```bash
-jjobs -o exec_host:4096 <jobid>
-```
-
-输出格式：
-```
-EXEC_HOST
-64*ev-hpc-compute098:64*ev-hpc-compute164:64*ev-hpc-compute171
-```
-
-模块从这种格式中提取节点名称，忽略数字前缀（CPU数量）。如果 EXEC_HOST 是 "-"（等待作业），则不返回任何节点。
-
-对于节点组或所有节点，模块执行：
-```bash
-jhosts -w <jobgroup>
-```
-
-输出格式：
-```
-HOST_NAME
-ev-hpc-test02
-ev-hpc-test03
-ev-hpc-test04
-```
-
-模块从每行提取主机名。`jhosts -w` 命令只返回主机名，不返回详细属性。
-
-当使用 `-F` 选项进行筛选时，模块执行：
-```bash
-jhosts -w [nodegroup] -R "<filter_expression>"
-```
-
-例如，使用 `-F "select[mem>1000]"`，命令变为：
-```bash
-jhosts -w -R "select[mem>1000]"
-```
-
-这将筛选表达式直接传递给 jhosts，jhosts 根据指定的条件（如内存、GPU、CPU数量等）执行节点选择。
-
-**注意**：`-F` 选项仅适用于使用 `jhosts` 命令时（节点组或所有节点）。它不适用于数字作业ID，因为这些作业已有固定的节点分配。
-
-### JH_HOSTS 解析
-
-当设置 `JH_HOSTS` 时，模块以"主机名 核数 主机名 核数..."的格式解析字符串：
-
-```c
-JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
-```
-
-模块从奇数位置（第1、第3、第5、...）提取主机名，并忽略偶数位置（第2、第4、第6、...）的核数。
-
-## 故障排除
-
-### 模块未找到
-
-如果收到关于jhinno模块未找到的错误：
-
-```bash
-# 检查模块是否已加载
-pdsh -L | grep jhinno
-
-# 使用jhinno支持重新构建
-./configure --with-jhinno
-make
-make install
-```
-
-### 命令未找到
-
-如果收到关于 `jjobs` 或 `jhosts` 命令未找到的错误：
-
-1. 确保已安装jhinno作业调度器
-2. 验证命令在您的PATH中：
-   ```bash
-   which jjobs jhosts
-   ```
-3. 使用正确的路径配置模块
-
-### 未找到节点
-
-如果pdsh报告未找到节点：
-
-1. **对于作业查询**：验证作业ID是否有效，并检查作业是否在等待：
-   ```bash
-   jjobs -o exec_host:4096 <jobid>
-   # 如果输出是"-"，作业正在等待且没有分配节点
-   ```
-
-2. **对于节点组查询**：检查节点是否为UNKNOWN状态：
-   ```bash
-   jhosts attrib -w | grep UNKNOWN
-   ```
-
-3. **尝试包含UNKNOWN节点**：
-   ```bash
-   pdsh -j all --jhinno-include-unknown -n
-   ```
-
-4. **检查作业是否在等待**：
-   ```bash
-   pdsh -j <jobid> hostname
-   # 如果输出是"no remote hosts specified"，作业可能在等待
-   ```
-
-### 权限被拒绝
-
-如果收到权限被拒绝错误：
-
-1. 检查您的身份验证方法（rsh、ssh等）
-2. 确保您在目标节点上有适当的权限
-3. 如果使用SSH，验证SSH密钥已正确配置
-
-### 显式主机列表不工作
-
-如果 `JH_HOSTS` 不工作：
-
-1. 验证格式正确："主机名 核数 主机名 核数..."
-   ```bash
-   # 正确
-   export JH_HOSTS="ev-hpc-test01 128 ev-hpc-test02 128"
-   
-   # 错误（缺少核数）
-   export JH_HOSTS="ev-hpc-test01 ev-hpc-test02"
-   ```
-
-2. 确保主机名用空格分隔
-3. 如果使用 `-j` 选项，它将覆盖 `JH_HOSTS`
-
-## 示例
-
-### 示例1：检查系统信息
-
-```bash
-# 从所有节点获取uname
-pdsh -j all "uname -a"
-
-# 检查内核版本
-pdsh -j all "uname -r"
-
-# 检查发行版
-pdsh -j all "cat /etc/os-release | grep PRETTY_NAME"
-```
-
-### 示例2：系统维护
-
-```bash
-# 检查所有节点的磁盘空间
-pdsh -j all "df -h"
-
-# 检查内存使用情况
-pdsh -j all "free -h"
-
-# 检查正在运行的服务
-pdsh -j all "systemctl list-units --type=service --state=running"
-
-# 检查系统日志
-pdsh -j all "tail -20 /var/log/syslog"
-```
-
-### 示例3：应用程序部署
-
-```bash
-# 复制文件到作业节点
-pdcp -j 64882 /local/myapp /opt/
-
-# 安装软件包
-pdsh -j 64882 "yum install -y myapp"
-
-# 重启服务
-pdsh -j 64882 "systemctl restart myapp"
-```
-
-### 示例4：监控
-
-```bash
-# 检查CPU负载
-pdsh -j all "uptime"
-
-# 检查网络连接
-pdsh -j all "netstat -an | grep ESTABLISHED | wc -l"
-
-# 检查进程数
-pdsh -j all "ps aux | wc -l"
-```
-
-### 示例5：使用JH_HOSTS创建自定义节点列表
-
-```bash
-# 在特定节点上执行而不查询作业调度器
-export JH_HOSTS="node1 64 node2 64 node3 128"
-pdsh "uptime"
-
-# 用于测试或作业调度器不可用时
-export JH_HOSTS="test-node01 32 test-node02 32"
-pdsh "hostname"
-```
-
-### 示例6：等待作业检测
-
-```bash
-# 测试等待作业
-pdsh -j 62568 hostname
-# 如果输出: "pdsh@host: no remote hosts specified"
-# 作业62568正在等待且没有分配节点
-
-# 直接检查作业状态
-jjobs -o exec_host:4096 62568
-# 输出:
-# EXEC_HOST
-# -
-```
-
-## 性能考虑
-
-- 该模块为每个查询执行外部命令（`jjobs` 或 `jhosts`）
-- 对于大型集群（>1000节点），考虑缓存结果或限制节点数量
-- 根据您的网络容量调整并发度（`-f` 选项）：
-  ```bash
-  pdsh -j all -f 64 "hostname"
-  ```
-
-## 安全考虑
-
-- 确保配置了适当的身份验证（SSH密钥、rhosts等）
-- 在使用提升权限运行命令时要谨慎
-- 在生产系统上运行之前审查输出
-- 在整个集群上运行之前，在节点的子集上测试
-
-## 贡献
-
-要为jhinno模块贡献改进：
-
-1. Fork pdsh仓库
-2. 进行您的更改
-3. 彻底测试
-4. 提交pull request
-
-## 许可证
-
-jhinno模块是pdsh的一部分，根据GNU通用公共许可证（GPL）授权。
-
-## 支持
-
-对于问题、疑问或贡献：
-
-- GitHub: https://github.com/YUTIAN0/pdsh
-- 邮件列表: pdsh-users@lists.sourceforge.net
 
 ## 版本历史
 
+- **1.3** - 增强 -j 选项，支持完整资源请求串
+  - 支持完整的资源请求串：select、order、rusage、span
+  - 简化使用方式：pdsh -j "select[mem>1000]"
+  - 可组合多个段：select、order、rusage、span
+  - 当同时使用 -j 资源串和 -F 选项时进行冲突检测
+  - 与 -j all -F "expression" 方式向后兼容
+
 - **1.2** - 节点筛选支持
-  - 添加 `-F` 选项用于 jhosts 选择表达式（例如 `-F "select[mem>1000]"`）
-  - 将 jhosts 命令格式从 `jhosts attrib -w` 更改为 `jhosts -w`
-  - 支持按属性筛选节点（内存、GPU、CPU等）
-  
-- **1.1** - 增强功能
-  - 自动过滤等待作业（EXEC_HOST = "-"）
-  - JH_HOSTS环境变量支持显式主机列表
-  - 改进对没有分配节点的作业的错误处理
-  
-- **1.0** - 初始版本
-  - 支持jjobs和jhosts命令
-  - 作业ID和节点组查询
-  - 自动UNKNOWN节点过滤
-  - 环境变量支持（JOBS_JOBID）
+  - 添加 -F 选项用于节点筛选
+  - 将 jhosts 命令从 "attrib -w" 改为 "-w"
+  - 添加等待作业的自动过滤
+  - 增强 jhosts 输出中的空格处理
+
+- **1.1** - 基本实现
+  - 支持 -j 作业ID和节点组
+  - 支持 -j all
+  - JOBS_JOBID 和 JH_HOSTS 环境变量
+  --jhinno-include-unknown 选项
+
+## 系统要求
+
+- pdsh（需要模块支持）
+- jjobs 命令（用于作业ID查找）
+- jhosts 命令（用于节点组和筛选）
+- 访问 JHINNO（景行）作业调度系统
+
+## 文件
+
+- src/modules/jhinno.c - 模块源代码
+- README_jhinno_cn.md - 本文件
+
+## 参见
+
+pdsh(1)、jjobs(1)、jhosts(1)、JHINNO 文档

@@ -71,8 +71,10 @@ struct pdsh_module_operations jhinno_module_ops = {
  */
 struct pdsh_module_option jhinno_module_options[] = {
     { 'j', "jobid_or_group,...",
-      "Run on nodes from jhinno job (number) or node group. "
-      "Use special value 'all' to get all normal nodes.",
+      "Run on nodes from jhinno job (number), node group, or resource request string. "
+      "Use special value 'all' to get all normal nodes. "
+      "Resource request strings use brackets: select[], order[], rusage[], span[]. "
+      "e.g., -j 'select[mem>1000]' or -j 'select[gpus>0] rusage[gpu=1]'.",
       DSH | PCP, (optFunc) jhinno_process_opt
     },
     { 'F', "expression",
@@ -109,16 +111,59 @@ static int mod_jhinno_exit(void)
     return 0;
 }
 
+/*
+ * Check if string contains resource request keywords
+ * Returns 1 if it's a resource request string, 0 otherwise
+ */
+static int _is_resource_request_string(const char *s)
+{
+    if (s == NULL || *s == '\0')
+        return 0;
+    
+    /* Check for resource request segments: select[], order[], rusage[], span[] */
+    if (strstr(s, "select[") != NULL || strstr(s, "SELECT[") != NULL ||
+        strstr(s, "order[") != NULL || strstr(s, "ORDER[") != NULL ||
+        strstr(s, "rusage[") != NULL || strstr(s, "RUSAGE[") != NULL ||
+        strstr(s, "span[") != NULL || strstr(s, "SPAN[") != NULL) {
+        return 1;
+    }
+    
+    return 0;
+}
+
 static int jhinno_process_opt(opt_t *pdsh_opts, int opt, char *arg)
 {
     switch (opt) {
     case 'j':
         if (arg == NULL)
             return 0;
+        
+        /* Check for conflict with -F option */
+        if (_is_resource_request_string(arg) && filter_expression != NULL) {
+            err("%p: jhinno: Cannot specify resource request string with both -j and -F options\n");
+            err("%p: jhinno: Use either '-j \"expression\"' OR '-j group -F \"expression\"', not both\n");
+            return -1;
+        }
+        
         job_list = list_split_append(job_list, ",", arg);
         break;
     case 'F':  /* Filter expression for jhosts -R */
         if (arg != NULL && arg[0] != '\0') {
+            /* Check for conflict with -j option that already has a resource request string */
+            if (job_list != NULL) {
+                ListIterator li = list_iterator_create(job_list);
+                char *job;
+                while ((job = list_next(li))) {
+                    if (job != NULL && _is_resource_request_string(job)) {
+                        err("%p: jhinno: Cannot specify resource request string with both -j and -F options\n");
+                        err("%p: jhinno: Use either '-j \"expression\"' OR '-j group -F \"expression\"', not both\n");
+                        list_iterator_destroy(li);
+                        return -1;
+                    }
+                }
+                list_iterator_destroy(li);
+            }
+            
             if (filter_expression != NULL) {
                 free(filter_expression);
             }
@@ -495,6 +540,103 @@ static hostlist_t _jhinno_wcoll_all(void)
 }
 
 /*
+ * Parse using resource request string directly
+ * Command: jhosts -w -R "expression"
+* Format: select[] order[] rusage[] span[]
+*/
+static hostlist_t _jhinno_wcoll_by_filter(const char *filter_expr)
+{
+    FILE *fp = NULL;
+    char cmd[1024];
+    char line[8192];  /* Large buffer for long host lists */
+    char line_copy[8192];  /* Copy for strtok */
+    hostlist_t hl = NULL;
+    int line_num = 0;
+    int ret;
+    int cmd_len;
+    
+    if (filter_expr == NULL || filter_expr[0] == '\0') {
+        err("%p: jhinno: resource request string is NULL or empty\n");
+        return NULL;
+    }
+    
+    /* Build command: jhosts -w -R "expression" */
+    cmd_len = snprintf(cmd, sizeof(cmd), 
+                      "jhosts -w -R \"%s\" 2>/dev/null", 
+                      filter_expr);
+    
+    if (cmd_len < 0 || (size_t)cmd_len >= sizeof(cmd)) {
+        err("%p: jhinno: resource request string too long\n");
+        return NULL;
+    }
+    
+    fp = popen(cmd, "r");
+    if (fp == NULL) {
+        err("%p: jhinno: Failed to execute jhosts command: %s\n", strerror(errno));
+        return NULL;
+    }
+    
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        line_num++;
+        
+        /* Skip first line (header) */
+        if (line_num == 1)
+            continue;
+        
+        /* Make a copy for strtok since it modifies the string */
+        strncpy(line_copy, line, sizeof(line_copy) - 1);
+        line_copy[sizeof(line_copy) - 1] = '\0';
+        
+        /* Remove newline */
+        line_copy[strcspn(line_copy, "\n")] = '\0';
+        
+        /* Skip empty lines */
+        if (strlen(line_copy) == 0)
+            continue;
+        
+        /* Extract hostname (first field) */
+        char *hostname = strtok(line_copy, " \t");
+        if (hostname == NULL || hostname[0] == '\0')
+            continue;
+        
+        /* Skip whitespace */
+        while (*hostname == ' ' || *hostname == '\t')
+            hostname++;
+        
+        if (*hostname == '\0')
+            continue;
+        
+        /* For jhosts -w output, each line is just a hostname */
+        
+        if (hl == NULL) {
+            hl = hostlist_create(hostname);
+            if (hl == NULL) {
+                err("%p: jhinno: Failed to create hostlist\n");
+                if (fp) pclose(fp);
+                return NULL;
+            }
+        } else {
+            ret = hostlist_push_host(hl, hostname);
+            if (ret < 0) {
+                err("%p: jhinno: Failed to add host to list\n");
+                /* Continue with other hosts */
+            }
+        }
+    }
+    
+    if (fp) {
+        if (pclose(fp) != 0) {
+            err("%p: jhinno: jhosts command failed\n");
+        }
+    }
+    
+    if (hl)
+        hostlist_uniq(hl);
+    
+    return hl;
+}
+
+/*
  * Parse JH_HOSTS environment variable
  * Format: "hostname1 corecount hostname2 corecount hostname3 corecount..."
  * Example: "ev-hpc-test02 128 ev-hpc-test01 128"
@@ -596,7 +738,9 @@ static int mod_jhinno_wcoll(opt_t *opt)
         char *env_var = getenv("JOBS_JOBID");
         if (env_var != NULL) {
             /* Parse single jobid from env var */
-            if (_is_jobid_numeric(env_var)) {
+            if (_is_resource_request_string(env_var)) {
+                hl = _jhinno_wcoll_by_filter(env_var);
+            } else if (_is_jobid_numeric(env_var)) {
                 hl = _jhinno_wcoll_from_jobid(env_var);
             } else if (strcmp(env_var, "all") == 0) {
                 hl = _jhinno_wcoll_all();
@@ -616,7 +760,10 @@ static int mod_jhinno_wcoll(opt_t *opt)
             if (job == NULL || job[0] == '\0')
                 continue;
             
-            if (strcmp(job, "all") == 0) {
+            /* Check for resource request string: select[], order[], rusage[], span[] */
+            if (_is_resource_request_string(job)) {
+                tmp_hl = _jhinno_wcoll_by_filter(job);
+            } else if (strcmp(job, "all") == 0) {
                 tmp_hl = _jhinno_wcoll_all();
             } else if (_is_jobid_numeric(job)) {
                 tmp_hl = _jhinno_wcoll_from_jobid(job);
